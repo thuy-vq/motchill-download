@@ -1,0 +1,33 @@
+name: Build macOS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: wails-app/go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: wails-app/frontend/package-lock.json
+
+      - name: Install Wails v2
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
+
+      - name: Build universal macOS app
+        run: bash build-macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VideoHtmlDownloader-macOS-12-universal
+          path: dist-macos/*.zip
+          if-no-files-found: error

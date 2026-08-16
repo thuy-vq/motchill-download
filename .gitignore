@@ -1,0 +1,21 @@
+# Build outputs
+/dist/
+/dist-macos/
+/wails-app/build/bin/
+/wails-app/frontend/dist/
+
+# Platform dependencies
+/wails-app/frontend/node_modules/
+
+# Packaged applications and archives
+*.exe
+*.app
+*.dmg
+*.zip
+
+# Local/editor files
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/

@@ -1,6 +1,7 @@
 # Video HTML Downloader — Wails v2 + React/TypeScript
 
 Ứng dụng Windows 10/11 và macOS tìm và tải video từ URL trang hoặc mã HTML. Backend Go nhận diện HLS (`.m3u8`), DASH (`.mpd`) và video trực tiếp; frontend React/TypeScript cung cấp danh sách tập và hàng đợi tải tuần tự.
+Link: https://motchillu.app/phim/y-thien-do-long-ky-1703867226
 
 ## Chạy ứng dụng
 

@@ -6,6 +6,8 @@ export function AnalyzeHTML(arg1:string):Promise<main.AnalysisResult>;
 
 export function AnalyzeSource(arg1:string):Promise<main.AnalysisResult>;
 
+export function AppendLog(arg1:string):Promise<string>;
+
 export function CancelDownload():Promise<void>;
 
 export function ChooseFFmpeg():Promise<main.FFmpegStatus>;
@@ -14,13 +16,21 @@ export function GetFFmpegStatus():Promise<main.FFmpegStatus>;
 
 export function GetInitialState():Promise<main.InitialState>;
 
+export function GetLogPath():Promise<string>;
+
 export function InstallFFmpeg():Promise<main.FFmpegStatus>;
 
+export function NewLogSession():Promise<string>;
+
 export function OpenHTMLFile():Promise<main.SourceDocument>;
+
+export function PauseDownload():Promise<main.DownloadControlStatus>;
 
 export function RememberOutputDirectory(arg1:string):Promise<void>;
 
 export function RevealFile(arg1:string):Promise<void>;
+
+export function SaveLog(arg1:string):Promise<string>;
 
 export function SelectOutputDirectory():Promise<string>;
 

@@ -2,6 +2,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
+if [[ "${BUMP_VERSION:-1}" == "1" ]]; then
+  node scripts/bump-version.mjs
+fi
+VERSION="$(tr -d '\r\n' < VERSION)"
 cd "$ROOT/wails-app"
 
 # Go 1.25+ requires macOS 12 or newer. This is lower than the requested macOS 13 floor.
@@ -16,6 +21,6 @@ codesign --force --deep --sign - "$APP"
 
 mkdir -p "$ROOT/dist-macos"
 ditto -c -k --sequesterRsrc --keepParent "$APP" \
-  "$ROOT/dist-macos/VideoHtmlDownloader-macOS-12-universal.zip"
+  "$ROOT/dist-macos/VideoHtmlDownloader-v${VERSION}-macOS-12-universal.zip"
 
-echo "Built: $ROOT/dist-macos/VideoHtmlDownloader-macOS-12-universal.zip"
+echo "Built: $ROOT/dist-macos/VideoHtmlDownloader-v${VERSION}-macOS-12-universal.zip"

@@ -29,6 +29,13 @@ type InitialState struct {
 	FFmpegReady   bool   `json:"ffmpegReady"`
 	FFmpegPath    string `json:"ffmpegPath"`
 	Platform      string `json:"platform"`
+	Version       string `json:"version"`
+	LogDir        string `json:"logDir"`
+	LogPath       string `json:"logPath"`
+}
+
+type DownloadControlStatus struct {
+	Paused bool `json:"paused"`
 }
 
 type FFmpegStatus struct {

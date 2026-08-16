@@ -102,7 +102,7 @@ Script sẽ tự động:
 Kết quả nằm tại:
 
 ```text
-dist-macos/VideoHtmlDownloader-macOS-12-universal.zip
+dist-macos/VideoHtmlDownloader-v1.0.1-macOS-12-universal.zip
 ```
 
 ## 6. Cài và mở ứng dụng
@@ -135,7 +135,7 @@ Chỉ cần mở Terminal tại thư mục dự án và chạy lại:
 bash build-macos.sh
 ```
 
-File ZIP mới sẽ thay thế kết quả trong thư mục `dist-macos`.
+Mỗi lần build, số patch sẽ tự tăng (`1.0.1` → `1.0.2`) và tạo một file ZIP có số phiên bản mới trong `dist-macos`.
 
 ## Xử lý lỗi thường gặp
 

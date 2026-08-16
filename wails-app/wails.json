@@ -13,7 +13,7 @@
   "info": {
     "companyName": "",
     "productName": "Video HTML Downloader",
-    "productVersion": "2.0.0",
+    "productVersion": "1.0.3",
     "copyright": "",
     "comments": "Wails v2 + React/TypeScript video downloader"
   }

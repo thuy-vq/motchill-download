@@ -10,6 +10,10 @@ export function AnalyzeSource(arg1) {
   return window['go']['main']['App']['AnalyzeSource'](arg1);
 }
 
+export function AppendLog(arg1) {
+  return window['go']['main']['App']['AppendLog'](arg1);
+}
+
 export function CancelDownload() {
   return window['go']['main']['App']['CancelDownload']();
 }
@@ -26,12 +30,24 @@ export function GetInitialState() {
   return window['go']['main']['App']['GetInitialState']();
 }
 
+export function GetLogPath() {
+  return window['go']['main']['App']['GetLogPath']();
+}
+
 export function InstallFFmpeg() {
   return window['go']['main']['App']['InstallFFmpeg']();
 }
 
+export function NewLogSession() {
+  return window['go']['main']['App']['NewLogSession']();
+}
+
 export function OpenHTMLFile() {
   return window['go']['main']['App']['OpenHTMLFile']();
+}
+
+export function PauseDownload() {
+  return window['go']['main']['App']['PauseDownload']();
 }
 
 export function RememberOutputDirectory(arg1) {
@@ -40,6 +56,10 @@ export function RememberOutputDirectory(arg1) {
 
 export function RevealFile(arg1) {
   return window['go']['main']['App']['RevealFile'](arg1);
+}
+
+export function SaveLog(arg1) {
+  return window['go']['main']['App']['SaveLog'](arg1);
 }
 
 export function SelectOutputDirectory() {

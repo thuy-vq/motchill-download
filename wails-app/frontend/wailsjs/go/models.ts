@@ -78,6 +78,18 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class DownloadControlStatus {
+	    paused: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new DownloadControlStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.paused = source["paused"];
+	    }
+	}
 	export class DownloadItem {
 	    id: string;
 	    name: string;
@@ -160,6 +172,9 @@ export namespace main {
 	    ffmpegReady: boolean;
 	    ffmpegPath: string;
 	    platform: string;
+	    version: string;
+	    logDir: string;
+	    logPath: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new InitialState(source);
@@ -171,6 +186,9 @@ export namespace main {
 	        this.ffmpegReady = source["ffmpegReady"];
 	        this.ffmpegPath = source["ffmpegPath"];
 	        this.platform = source["platform"];
+	        this.version = source["version"];
+	        this.logDir = source["logDir"];
+	        this.logPath = source["logPath"];
 	    }
 	}
 	

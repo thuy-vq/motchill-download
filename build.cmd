@@ -2,6 +2,11 @@
 setlocal
 cd /d "%~dp0"
 
+node "scripts\bump-version.mjs"
+if errorlevel 1 exit /b 1
+set /p APP_VERSION=<VERSION
+echo Building version %APP_VERSION%...
+
 set "WAILS=%USERPROFILE%\go\bin\wails.exe"
 if not exist "%WAILS%" (
   echo Khong tim thay Wails CLI.
@@ -24,9 +29,12 @@ if errorlevel 1 (
 popd
 
 if not exist "dist" mkdir "dist"
+copy /y "wails-app\build\bin\VideoHtmlDownloader.exe" "dist\VideoHtmlDownloader-v%APP_VERSION%.exe" >nul
+if errorlevel 1 exit /b 1
 copy /y "wails-app\build\bin\VideoHtmlDownloader.exe" "dist\VideoHtmlDownloader.exe" >nul
 if errorlevel 1 exit /b 1
 
 echo.
-echo Da tao: dist\VideoHtmlDownloader.exe
+echo Da tao: dist\VideoHtmlDownloader-v%APP_VERSION%.exe
+echo Ban moi nhat: dist\VideoHtmlDownloader.exe
 exit /b 0

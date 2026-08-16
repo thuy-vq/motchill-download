@@ -20,15 +20,18 @@ import (
 const ffmpegDownloadURL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 
 type App struct {
-	ctx         context.Context
-	settings    *settingsStore
-	mu          sync.Mutex
-	downloading bool
-	cancel      context.CancelFunc
+	ctx          context.Context
+	settings     *settingsStore
+	autoLog      *autoLogger
+	mu           sync.Mutex
+	downloading  bool
+	cancel       context.CancelFunc
+	activeFFmpeg *os.Process
+	paused       bool
 }
 
 func NewApp() *App {
-	return &App{settings: newSettingsStore()}
+	return &App{settings: newSettingsStore(), autoLog: newAutoLogger()}
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -37,6 +40,7 @@ func (a *App) startup(ctx context.Context) {
 
 func (a *App) shutdown(ctx context.Context) {
 	a.CancelDownload()
+	a.autoLog.close()
 }
 
 func (a *App) GetInitialState() InitialState {
@@ -47,6 +51,9 @@ func (a *App) GetInitialState() InitialState {
 		FFmpegReady:   ffmpeg != "",
 		FFmpegPath:    ffmpeg,
 		Platform:      runtime.GOOS,
+		Version:       appVersion,
+		LogDir:        a.autoLog.directory(),
+		LogPath:       a.autoLog.currentPath(),
 	}
 }
 
@@ -195,6 +202,53 @@ func (a *App) RememberOutputDirectory(directory string) error {
 		return err
 	}
 	return a.settings.setOutputDir(directory)
+}
+
+// AppendLog persists one line immediately; the frontend calls it for every line
+// it shows so the nhật ký survives a crash without pressing "Lưu log".
+func (a *App) AppendLog(line string) (string, error) {
+	return a.autoLog.append(line)
+}
+
+// NewLogSession starts a fresh auto-saved file, one per download run.
+func (a *App) NewLogSession() string {
+	a.autoLog.startSession()
+	return a.autoLog.directory()
+}
+
+func (a *App) GetLogPath() string {
+	return a.autoLog.currentPath()
+}
+
+func (a *App) SaveLog(content string) (string, error) {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return "", fmt.Errorf("nhật ký đang trống")
+	}
+	settings := a.settings.snapshot()
+	filename := fmt.Sprintf("VideoHtmlDownloader-v%s-%s.log", appVersion, time.Now().Format("20060102-150405"))
+	selected, err := wailsruntime.SaveFileDialog(a.ctx, wailsruntime.SaveDialogOptions{
+		Title:            "Lưu nhật ký tải",
+		DefaultDirectory: settings.LastOutputDir,
+		DefaultFilename:  filename,
+		Filters:          []wailsruntime.FileFilter{{DisplayName: "Nhật ký", Pattern: "*.log"}, {DisplayName: "Văn bản", Pattern: "*.txt"}},
+	})
+	if err != nil || selected == "" {
+		return selected, err
+	}
+	if err := os.MkdirAll(filepath.Dir(selected), 0o755); err != nil {
+		return "", err
+	}
+	if err := writeLogFile(selected, content); err != nil {
+		return "", err
+	}
+	return selected, nil
+}
+
+func writeLogFile(path, content string) error {
+	content = strings.ReplaceAll(strings.ReplaceAll(content, "\r\n", "\n"), "\n", newlineForHost())
+	// UTF-8 BOM keeps Vietnamese text readable in older Windows Notepad.
+	return os.WriteFile(path, append([]byte{0xEF, 0xBB, 0xBF}, []byte(content)...), 0o600)
 }
 
 func (a *App) GetFFmpegStatus() FFmpegStatus {
@@ -376,6 +430,7 @@ func (a *App) findFFmpeg() string {
 
 func verifyFFmpeg(path string) error {
 	command := exec.Command(path, "-version")
+	prepareBackgroundCommand(command)
 	if err := command.Run(); err != nil {
 		return fmt.Errorf("ffmpeg.exe không chạy được: %w", err)
 	}

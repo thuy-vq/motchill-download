@@ -25,6 +25,8 @@ jobs:
 
       - name: Build universal macOS app
         run: bash build-macos.sh
+        env:
+          BUMP_VERSION: "0"
 
       - uses: actions/upload-artifact@v4
         with:

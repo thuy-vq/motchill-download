@@ -62,6 +62,8 @@ func (a *App) StartDownload(request DownloadRequest) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	a.downloading = true
 	a.cancel = cancel
+	a.paused = false
+	a.activeFFmpeg = nil
 	a.mu.Unlock()
 
 	go a.runQueue(ctx, ffmpeg, request)
@@ -71,10 +73,56 @@ func (a *App) StartDownload(request DownloadRequest) error {
 func (a *App) CancelDownload() {
 	a.mu.Lock()
 	cancel := a.cancel
+	process := a.activeFFmpeg
+	wasPaused := a.paused
+	a.paused = false
 	a.mu.Unlock()
+	if wasPaused && process != nil {
+		_ = setProcessPaused(process, false)
+	}
 	if cancel != nil {
 		cancel()
 	}
+}
+
+func (a *App) PauseDownload() (DownloadControlStatus, error) {
+	a.mu.Lock()
+	if !a.downloading {
+		a.mu.Unlock()
+		return DownloadControlStatus{}, fmt.Errorf("không có hàng đợi đang tải")
+	}
+	process := a.activeFFmpeg
+	targetPaused := !a.paused
+	a.mu.Unlock()
+	if process == nil {
+		return DownloadControlStatus{}, fmt.Errorf("đang chuyển tập, hãy thử lại sau một lát")
+	}
+	if err := setProcessPaused(process, targetPaused); err != nil {
+		return DownloadControlStatus{}, err
+	}
+	a.mu.Lock()
+	if a.activeFFmpeg == process {
+		a.paused = targetPaused
+	}
+	paused := a.paused
+	a.mu.Unlock()
+	return DownloadControlStatus{Paused: paused}, nil
+}
+
+func (a *App) setActiveFFmpeg(process *os.Process) {
+	a.mu.Lock()
+	a.activeFFmpeg = process
+	a.paused = false
+	a.mu.Unlock()
+}
+
+func (a *App) clearActiveFFmpeg(process *os.Process) {
+	a.mu.Lock()
+	if a.activeFFmpeg == process {
+		a.activeFFmpeg = nil
+		a.paused = false
+	}
+	a.mu.Unlock()
 }
 
 func (a *App) runQueue(ctx context.Context, ffmpeg string, request DownloadRequest) {
@@ -82,6 +130,8 @@ func (a *App) runQueue(ctx context.Context, ffmpeg string, request DownloadReque
 		a.mu.Lock()
 		a.downloading = false
 		a.cancel = nil
+		a.activeFFmpeg = nil
+		a.paused = false
 		a.mu.Unlock()
 	}()
 
@@ -250,6 +300,7 @@ func (a *App) downloadStream(ctx context.Context, ffmpeg, mediaURL, referer, out
 		"-map", "0:v:0?", "-map", "0:a?", "-c", "copy", "-movflags", "+faststart", partial,
 	}
 	command := exec.CommandContext(ctx, ffmpeg, args...)
+	prepareBackgroundCommand(command)
 	stderr, err := command.StderrPipe()
 	if err != nil {
 		return err
@@ -257,6 +308,8 @@ func (a *App) downloadStream(ctx context.Context, ffmpeg, mediaURL, referer, out
 	if err := command.Start(); err != nil {
 		return err
 	}
+	a.setActiveFFmpeg(command.Process)
+	defer a.clearActiveFFmpeg(command.Process)
 	lastLines := make([]string, 0, 12)
 	lastProgress := time.Time{}
 	scanner := bufio.NewScanner(stderr)

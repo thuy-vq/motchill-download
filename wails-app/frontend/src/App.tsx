@@ -1,8 +1,8 @@
 import {useEffect, useMemo, useRef, useState} from 'react';
 import './App.css';
 import {
-    AnalyzeHTML, AnalyzeSource, CancelDownload, ChooseFFmpeg, GetInitialState, InstallFFmpeg,
-    OpenHTMLFile, RevealFile, SelectOutputDirectory, StartDownload,
+    AnalyzeHTML, AnalyzeSource, AppendLog, CancelDownload, ChooseFFmpeg, GetInitialState, InstallFFmpeg,
+    NewLogSession, PauseDownload, OpenHTMLFile, RevealFile, SaveLog, SelectOutputDirectory, StartDownload,
 } from '../wailsjs/go/main/App';
 import {EventsOff, EventsOn} from '../wailsjs/runtime/runtime';
 
@@ -36,17 +36,21 @@ function App() {
     const [source, setSource] = useState('');
     const [movies, setMovies] = useState<MovieEntry[]>([]);
     const [selected, setSelected] = useState<Set<string>>(new Set());
+    const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
     const [defaultOutputDir, setDefaultOutputDir] = useState('');
     const [preferredServer, setPreferredServer] = useState('');
     const [skipExisting, setSkipExisting] = useState(true);
     const [ffmpegReady, setFfmpegReady] = useState(false);
     const [ffmpegPath, setFfmpegPath] = useState('');
     const [platform, setPlatform] = useState('windows');
+    const [appVersion, setAppVersion] = useState('');
     const [ffmpegInstalling, setFfmpegInstalling] = useState(false);
     const [ffmpegProgress, setFfmpegProgress] = useState(0);
     const [analyzing, setAnalyzing] = useState(false);
     const [analyzeProgress, setAnalyzeProgress] = useState('');
     const [running, setRunning] = useState(false);
+    const [paused, setPaused] = useState(false);
+    const [pauseBusy, setPauseBusy] = useState(false);
     const [notice, setNotice] = useState('Có thể nhập nhiều URL, mỗi URL một dòng.');
     const [error, setError] = useState('');
     const [queue, setQueue] = useState<Record<string, QueueEvent>>({});
@@ -55,8 +59,14 @@ function App() {
     const [done, setDone] = useState<DoneEvent | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
     const [lastOutput, setLastOutput] = useState('');
+    const [savedLogPath, setSavedLogPath] = useState('');
+    const [autoLogPath, setAutoLogPath] = useState('');
+    const [autoLogError, setAutoLogError] = useState('');
+    const [logDir, setLogDir] = useState('');
     const movieSequence = useRef(0);
     const logEnd = useRef<HTMLDivElement>(null);
+    // Every disk write goes through one promise chain so lines land in order.
+    const logWrites = useRef<Promise<unknown>>(Promise.resolve());
 
     const allEpisodeKeys = useMemo(() => movies.flatMap(movie =>
         movie.analysis.episodes.map(episode => episodeKey(movie.key, episode.id))), [movies]);
@@ -73,6 +83,7 @@ function App() {
 
     const selectedCount = selected.size;
     const allSelected = allEpisodeKeys.length > 0 && selectedCount === allEpisodeKeys.length;
+    const allCollapsed = movies.length > 0 && movies.every(movie => collapsed.has(movie.key));
     const selectedDirectories = [...new Set(selectedMovies.map(movie => movie.outputDir).filter(Boolean))];
     const folderDisplay = selectedMovies.length === 0
         ? defaultOutputDir
@@ -82,7 +93,28 @@ function App() {
 
     function appendLog(line: string) {
         const stamp = new Date().toLocaleTimeString('vi-VN', {hour12: false});
-        setLogs(previous => [...previous.slice(-299), `[${stamp}] ${line}`]);
+        const entry = `[${stamp}] ${line}`;
+        setLogs(previous => [...previous.slice(-299), entry]);
+        persistLog(entry);
+    }
+
+    // Auto-save: each line is written to disk right away, so nothing is lost if
+    // the app closes before "Lưu log" is pressed.
+    function persistLog(entry: string) {
+        logWrites.current = logWrites.current
+            .then(() => AppendLog(entry))
+            .then(path => {
+                if (path) setAutoLogPath(previous => (path === previous ? previous : path));
+                setAutoLogError(previous => (previous ? '' : previous));
+            })
+            .catch(reason => setAutoLogError(errorMessage(reason)));
+    }
+
+    function startLogSession() {
+        logWrites.current = logWrites.current
+            .then(() => NewLogSession())
+            .catch(reason => setAutoLogError(errorMessage(reason)));
+        setAutoLogPath('');
     }
 
     useEffect(() => {
@@ -91,18 +123,30 @@ function App() {
             setFfmpegReady(Boolean(state.ffmpegReady));
             setFfmpegPath(state.ffmpegPath || '');
             setPlatform(state.platform || 'windows');
+            setAppVersion(state.version || '');
+            setLogDir(state.logDir || '');
+            if (state.logPath) setAutoLogPath(state.logPath);
         }).catch((reason: unknown) => setError(errorMessage(reason)));
 
         EventsOn('download:queue', (event: QueueEvent) => {
             setActiveQueue(event);
             setQueue(previous => ({...previous, [event.id || `${event.movie}:${event.name}`]: event}));
-            if (event.status === 'completed' && event.output) setLastOutput(event.output);
-            if (event.status === 'failed') appendLog(`${event.movie} · ${event.name}: ${event.message || 'tải thất bại'}`);
+            const label = `${event.movie} · ${event.name}`;
+            if (event.status === 'downloading') appendLog(`${label}: bắt đầu tải.`);
+            if (event.status === 'completed') {
+                if (event.output) setLastOutput(event.output);
+                appendLog(`${label}: hoàn tất${event.output ? ` → ${event.output}` : '.'}`);
+            }
+            if (event.status === 'skipped') appendLog(`${label}: bỏ qua — ${event.message || 'file đã có'}.`);
+            if (event.status === 'failed') appendLog(`${label}: LỖI — ${event.message || 'tải thất bại'}`);
         });
         EventsOn('download:progress', (event: ProgressEvent) => setProgress(event));
         EventsOn('download:log', (line: string) => appendLog(line));
         EventsOn('download:done', (event: DoneEvent) => {
-            setDone(event); setRunning(false); setProgress(null);
+            setDone(event); setRunning(false); setPaused(false); setProgress(null);
+            appendLog(event.cancelled
+                ? `Đã hủy hàng đợi: ${event.completed}/${event.total} tập hoàn tất.`
+                : `Kết thúc: ${event.completed} thành công, ${event.failed} lỗi, ${event.skipped} bỏ qua.`);
             setNotice(event.cancelled
                 ? `Đã hủy. Hoàn tất ${event.completed}/${event.total} tập.`
                 : `Xong hàng đợi: ${event.completed} thành công, ${event.failed} lỗi, ${event.skipped} bỏ qua.`);
@@ -224,6 +268,18 @@ function App() {
         });
     }
 
+    function toggleCollapse(movieKey: string) {
+        setCollapsed(previous => {
+            const next = new Set(previous);
+            next.has(movieKey) ? next.delete(movieKey) : next.add(movieKey);
+            return next;
+        });
+    }
+
+    function toggleCollapseAll() {
+        setCollapsed(allCollapsed ? new Set() : new Set(movies.map(movie => movie.key)));
+    }
+
     function toggleEpisode(key: string) {
         setSelected(previous => {
             const next = new Set(previous); next.has(key) ? next.delete(key) : next.add(key); return next;
@@ -234,6 +290,9 @@ function App() {
         const keys = new Set(movie.analysis.episodes.map(episode => episodeKey(movie.key, episode.id)));
         setMovies(previous => previous.filter(item => item.key !== movie.key));
         setSelected(previous => new Set([...previous].filter(key => !keys.has(key))));
+        setCollapsed(previous => {
+            const next = new Set(previous); next.delete(movie.key); return next;
+        });
     }
 
     async function startDownload() {
@@ -244,7 +303,9 @@ function App() {
         if (!selectedEntries.length) { setError('Hãy chọn ít nhất một tập.'); return; }
         const missingFolders = [...new Set(selectedEntries.filter(item => !item.movie.outputDir.trim()).map(item => item.movie.analysis.title))];
         if (missingFolders.length) { setError(`Chưa chọn thư mục lưu cho: ${missingFolders.join(', ')}`); return; }
-        setError(''); setQueue({}); setDone(null); setLogs([]); setActiveQueue(null); setProgress(null);
+        setError(''); setQueue({}); setDone(null); setLogs([]); setSavedLogPath(''); setActiveQueue(null); setProgress(null);
+        startLogSession();
+        appendLog(`Bắt đầu hàng đợi: ${selectedEntries.length} tập của ${selectedMovies.length} phim.`);
         try {
             await StartDownload({
                 title: 'Nhiều phim', outputDir: defaultOutputDir, preferredServer, skipExisting,
@@ -254,11 +315,37 @@ function App() {
                 })),
             } as any);
             setRunning(true);
+            setPaused(false);
             setNotice(`Đã xếp ${selectedEntries.length} tập của ${selectedMovies.length} phim vào hàng đợi tuần tự.`);
         } catch (reason) { setError(errorMessage(reason)); }
     }
 
-    async function cancelDownload() { await CancelDownload(); setNotice('Đang dừng FFmpeg...'); }
+    async function togglePause() {
+        setPauseBusy(true); setError('');
+        try {
+            const status: any = await PauseDownload();
+            setPaused(Boolean(status.paused));
+            setNotice(status.paused ? 'Đã tạm dừng FFmpeg. Bấm Tiếp tục để tải tiếp.' : 'Đã tiếp tục hàng đợi tải.');
+        } catch (reason) { setError(errorMessage(reason)); }
+        finally { setPauseBusy(false); }
+    }
+
+    async function cancelDownload() { setPaused(false); await CancelDownload(); setNotice('Đang dừng FFmpeg...'); }
+
+    async function saveLog() {
+        if (!logs.length) { setError('Nhật ký đang trống.'); return; }
+        const header = [
+            `Video HTML Downloader v${appVersion || 'unknown'}`,
+            `Thời điểm lưu: ${new Date().toLocaleString('vi-VN')}`,
+            `Số phim trong danh sách: ${movies.length}`,
+            `Số tập đã chọn: ${selectedCount}`,
+            '------------------------------------------------------------',
+        ];
+        try {
+            const path = await SaveLog([...header, ...logs].join('\n'));
+            if (path) { setSavedLogPath(path); setNotice(`Đã lưu nhật ký: ${path}`); }
+        } catch (reason) { setError(errorMessage(reason)); }
+    }
 
     const overallPercent = done ? 100 : activeQueue
         ? Math.max(2, Math.round(((activeQueue.index - (['completed', 'skipped'].includes(activeQueue.status) ? 0 : 1)) / activeQueue.total) * 100)) : 0;
@@ -266,7 +353,7 @@ function App() {
     return (
         <main className="shell">
             <header className="topbar">
-                <div className="brand"><div className="brand-mark">V</div><div><h1>Video HTML Downloader</h1><p>Nhiều phim · nhiều thư mục · tải tuần tự</p></div></div>
+                <div className="brand"><div className="brand-mark">V</div><div><h1>Video HTML Downloader {appVersion && <span className="version-badge">v{appVersion}</span>}</h1><p>Nhiều phim · nhiều thư mục · tải tuần tự</p></div></div>
                 <div className={`ffmpeg-pill ${ffmpegReady ? 'ready' : ''}`} title={ffmpegPath || 'Chưa cấu hình'}><span className="status-dot"/> FFmpeg {ffmpegReady ? 'sẵn sàng' : 'chưa có'}</div>
             </header>
 
@@ -289,7 +376,8 @@ function App() {
                     {movies.length > 0 && <div className="selection-toolbar library-toolbar">
                         <label className={`check-action ${allSelected ? 'checked' : ''}`}><input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={running}/><span className="custom-check">✓</span><b>Chọn tất cả</b></label>
                         <button onClick={() => setSelected(new Set())} disabled={running}>Bỏ chọn tất cả</button>
-                        <button onClick={() => { setMovies([]); setSelected(new Set()); setQueue({}); }} disabled={running}>Xóa danh sách</button>
+                        <button onClick={toggleCollapseAll}>{allCollapsed ? '▾ Mở rộng tất cả' : '▸ Thu gọn tất cả'}</button>
+                        <button onClick={() => { setMovies([]); setSelected(new Set()); setCollapsed(new Set()); setQueue({}); }} disabled={running}>Xóa danh sách</button>
                     </div>}
                     <div className={`episode-list movie-list ${movies.length === 0 ? 'empty' : ''}`}>
                         {movies.length === 0 && <div className="empty-state"><div className="empty-icon">⌁</div><strong>Chưa có phim trong danh sách</strong><span>Nhập một hoặc nhiều link ở bước 01.</span></div>}
@@ -297,15 +385,25 @@ function App() {
                             const movieKeys = movie.analysis.episodes.map(episode => episodeKey(movie.key, episode.id));
                             const movieSelected = movieKeys.filter(key => selected.has(key)).length;
                             const movieAllSelected = movieKeys.length > 0 && movieSelected === movieKeys.length;
-                            return <article className="movie-group" key={movie.key}>
+                            const movieStates = movieKeys.map(key => queue[key]?.status).filter(Boolean) as string[];
+                            const movieDone = movieStates.filter(status => status === 'completed').length;
+                            const movieSkipped = movieStates.filter(status => status === 'skipped').length;
+                            const movieFailed = movieStates.filter(status => status === 'failed').length;
+                            const isCollapsed = collapsed.has(movie.key);
+                            return <article className={`movie-group ${isCollapsed ? 'collapsed' : ''}`} key={movie.key}>
                                 <div className="movie-header">
                                     <label className={`movie-check ${movieSelected ? 'checked' : ''}`}>
                                         <input type="checkbox" checked={movieAllSelected} onChange={() => toggleMovie(movie)} disabled={running}/><span className="custom-check">✓</span>
                                     </label>
-                                    <div className="movie-meta"><strong>{movie.analysis.title}</strong><span>{movie.analysis.episodes.length} tập · đã chọn {movieSelected}</span><small title={movie.outputDir || 'Chưa chọn thư mục'}>📁 {movie.outputDir || 'Chưa chọn thư mục lưu'}</small></div>
+                                    <div className="movie-meta" onClick={() => toggleCollapse(movie.key)} title={isCollapsed ? 'Bấm để mở rộng' : 'Bấm để thu gọn'}>
+                                        <strong>{movie.analysis.title}</strong>
+                                        <span>{movie.analysis.episodes.length} tập · đã chọn {movieSelected}{movieStates.length > 0 && <em className="movie-progress">✓ {movieDone} · ↷ {movieSkipped} · ! {movieFailed}</em>}</span>
+                                        <small title={movie.outputDir || 'Chưa chọn thư mục'}>📁 {movie.outputDir || 'Chưa chọn thư mục lưu'}</small>
+                                    </div>
+                                    <button className="collapse-movie" onClick={() => toggleCollapse(movie.key)} title={isCollapsed ? 'Mở rộng danh sách tập' : 'Thu gọn danh sách tập'} aria-expanded={!isCollapsed}>{isCollapsed ? '▸' : '▾'}</button>
                                     <button className="remove-movie" onClick={() => removeMovie(movie)} disabled={running} title="Xóa phim khỏi danh sách">×</button>
                                 </div>
-                                <div className="movie-episodes">
+                                {!isCollapsed && <div className="movie-episodes">
                                     {movie.analysis.episodes.map(episode => {
                                         const key = episodeKey(movie.key, episode.id);
                                         const state = queue[key];
@@ -316,7 +414,7 @@ function App() {
                                             {state && <span className={`queue-status ${state.status}`}>{statusLabels[state.status]}</span>}
                                         </label>;
                                     })}
-                                </div>
+                                </div>}
                             </article>;
                         })}
                     </div>
@@ -335,15 +433,24 @@ function App() {
                         <label className="switch-row"><input type="checkbox" checked={skipExisting} onChange={event => setSkipExisting(event.target.checked)} disabled={running}/><span className="switch"><i/></span><span><strong>Bỏ qua file đã có</strong><small>Tiện tiếp tục một hàng đợi đang tải dở</small></span></label>
                         {!ffmpegReady && <div className="ffmpeg-setup"><div><strong>Cần FFmpeg</strong><small>{platform === 'darwin' ? 'Cài qua Homebrew hoặc chọn binary ffmpeg có sẵn.' : 'Tải Essentials khoảng 106 MB hoặc chọn bản có sẵn.'}</small></div>{ffmpegInstalling && platform !== 'darwin' && <div className="mini-progress"><i style={{width: `${ffmpegProgress}%`}}/></div>}<div className="inline-actions"><button onClick={installFFmpeg} disabled={ffmpegInstalling}>{ffmpegInstalling ? (platform === 'darwin' ? 'Đang cài…' : `${ffmpegProgress}%`) : (platform === 'darwin' ? 'Cài bằng Homebrew' : 'Tự cài')}</button><button onClick={chooseFFmpeg} disabled={ffmpegInstalling}>Chọn file</button></div></div>}
                         {movies.length > 0 && <div className={`batch-summary ${allSelected ? 'all' : ''}`}><span>{selectedMovies.length} phim</span><strong>{selectedCount}/{allEpisodeKeys.length} tập</strong></div>}
-                        <button className="download-button" onClick={running ? cancelDownload : startDownload} disabled={!running && selectedCount === 0}>{running ? 'Dừng hàng đợi' : `Tải ${selectedCount || ''} tập · ${selectedMovies.length} phim`}</button>
+                        {!running && <button className="download-button" onClick={startDownload} disabled={selectedCount === 0}>{`Tải ${selectedCount || ''} tập · ${selectedMovies.length} phim`}</button>}
+                        {running && <div className="download-controls"><button className="pause-button" onClick={togglePause} disabled={pauseBusy || (!paused && activeQueue?.status !== 'downloading')}>{pauseBusy ? 'Đang xử lý…' : paused ? '▶ Tiếp tục' : '⏸ Tạm dừng'}</button><button className="stop-button" onClick={cancelDownload}>■ Dừng</button></div>}
                         <p className="legal-note">Chỉ tải nội dung bạn sở hữu hoặc được phép lưu. Không hỗ trợ DRM.</p>
                     </section>
 
                     <section className="card progress-card">
                         <div className="progress-head"><div><span>TRẠNG THÁI</span><strong>{notice}</strong></div>{running && activeQueue && <b>{activeQueue.index}/{activeQueue.total}</b>}</div>
-                        <div className={`overall-progress ${running ? 'active' : ''}`}><i style={{width: `${overallPercent}%`}}/></div>
+                        <div className={`overall-progress ${running && !paused ? 'active' : ''} ${paused ? 'paused' : ''}`}><i style={{width: `${overallPercent}%`}}/></div>
                         {progress && running && <div className="live-stats"><span>{progress.name}</span><span>Đã xử lý {progress.time}</span><span>{progress.speed || '—'}</span></div>}
                         {done && !running && <div className="summary-chips"><span className="ok">✓ {done.completed}</span><span className="skip">↷ {done.skipped}</span><span className="bad">! {done.failed}</span>{lastOutput && done.completed > 0 && <button onClick={() => RevealFile(lastOutput)}>Mở thư mục</button>}</div>}
+                        <div className="log-actions">
+                            <span className={autoLogError ? 'log-warning' : ''} title={autoLogError || autoLogPath || logDir}>
+                                {autoLogError ? `⚠ Không tự lưu được log: ${autoLogError}` : autoLogPath ? `✓ Tự động lưu · ${logs.length} dòng` : `${logs.length} dòng nhật ký`}
+                            </span>
+                            <button onClick={saveLog} disabled={!logs.length}>💾 Lưu bản sao</button>
+                            {(autoLogPath || logDir) && <button onClick={() => RevealFile(autoLogPath || logDir)} title={autoLogPath || logDir}>📂 Thư mục log</button>}
+                            {savedLogPath && <button onClick={() => RevealFile(savedLogPath)}>Mở bản sao</button>}
+                        </div>
                         <div className="log-view">{logs.length === 0 ? <span>Nhật ký tải sẽ xuất hiện tại đây.</span> : logs.map((line, index) => <div key={index}>{line}</div>)}<div ref={logEnd}/></div>
                     </section>
                 </aside>

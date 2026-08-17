@@ -16,7 +16,11 @@ const version = `${match[1]}.${match[2]}.${Number(match[3]) + 1}`;
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 config.info.productVersion = version;
 
+// Build date is shown in the in-app guide so users can tell how fresh a build is.
+const buildDate = new Date().toISOString().slice(0, 10);
+
 fs.writeFileSync(versionPath, `${version}\n`);
 fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
-fs.writeFileSync(goVersionPath, `package main\n\nconst appVersion = "${version}"\n`);
+fs.writeFileSync(goVersionPath,
+    `package main\n\nconst (\n\tappVersion   = "${version}"\n\tappBuildDate = "${buildDate}"\n)\n`);
 process.stdout.write(`${version}\n`);

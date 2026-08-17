@@ -13,6 +13,9 @@
 *.dmg
 *.zip
 
+# Local agent/editor config
+/.claude/
+
 # Local/editor files
 .DS_Store
 Thumbs.db

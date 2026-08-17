@@ -18,8 +18,16 @@ export function CancelDownload() {
   return window['go']['main']['App']['CancelDownload']();
 }
 
+export function CancelShutdown() {
+  return window['go']['main']['App']['CancelShutdown']();
+}
+
 export function ChooseFFmpeg() {
   return window['go']['main']['App']['ChooseFFmpeg']();
+}
+
+export function ClearSession() {
+  return window['go']['main']['App']['ClearSession']();
 }
 
 export function GetFFmpegStatus() {
@@ -32,6 +40,14 @@ export function GetInitialState() {
 
 export function GetLogPath() {
   return window['go']['main']['App']['GetLogPath']();
+}
+
+export function GetSavedSession() {
+  return window['go']['main']['App']['GetSavedSession']();
+}
+
+export function GetShutdownStatus() {
+  return window['go']['main']['App']['GetShutdownStatus']();
 }
 
 export function InstallFFmpeg() {
@@ -60,6 +76,14 @@ export function RevealFile(arg1) {
 
 export function SaveLog(arg1) {
   return window['go']['main']['App']['SaveLog'](arg1);
+}
+
+export function SaveSession(arg1) {
+  return window['go']['main']['App']['SaveSession'](arg1);
+}
+
+export function ScheduleShutdown(arg1) {
+  return window['go']['main']['App']['ScheduleShutdown'](arg1);
 }
 
 export function SelectOutputDirectory() {

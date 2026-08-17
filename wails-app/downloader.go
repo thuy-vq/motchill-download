@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -13,17 +14,34 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 var (
-	ffmpegTimePattern  = regexp.MustCompile(`time=\s*([^\s]+)`)
-	ffmpegSpeedPattern = regexp.MustCompile(`speed=\s*([^\s]+)`)
-	invalidFileChars   = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]`)
+	ffmpegTimePattern     = regexp.MustCompile(`time=\s*([^\s]+)`)
+	ffmpegSpeedPattern    = regexp.MustCompile(`speed=\s*([^\s]+)`)
+	ffmpegDurationPattern = regexp.MustCompile(`Duration:\s*(\d+:\d{2}:\d{2}(?:\.\d+)?)`)
+	// Lines emitted by "-progress": key=value with no spaces. They would
+	// otherwise flood the tail kept for error messages.
+	ffmpegProgressKey = regexp.MustCompile(`^[A-Za-z0-9_]+=\S*$`)
+	invalidFileChars      = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]`)
 )
+
+const (
+	// stallTimeout is how long FFmpeg may run without the decoded position
+	// moving before the download is treated as hung.
+	stallTimeout = 90 * time.Second
+	// stallAttempts is the total number of tries per episode, retries included.
+	stallAttempts = 3
+)
+
+// errStalled marks a download that was killed because it stopped progressing.
+var errStalled = errors.New("FFmpeg treo")
 
 func (a *App) StartDownload(request DownloadRequest) error {
 	if len(request.Items) == 0 {
@@ -198,26 +216,40 @@ func (a *App) runQueue(ctx context.Context, ffmpeg string, request DownloadReque
 		}
 
 		event.Status = "downloading"
+		event.Attempt = 1
 		wailsruntime.EventsEmit(a.ctx, "download:queue", event)
 		var lastErr error
-		for _, stream := range streams {
-			if ctx.Err() != nil {
+		for attempt := 1; attempt <= stallAttempts; attempt++ {
+			if attempt > 1 {
+				event.Attempt = attempt
+				event.Message = fmt.Sprintf("Tải lại lần %d sau khi treo", attempt)
+				wailsruntime.EventsEmit(a.ctx, "download:queue", event)
+				wailsruntime.EventsEmit(a.ctx, "download:log",
+					fmt.Sprintf("%s — tải lại lần %d/%d sau khi FFmpeg bị treo.", displayName, attempt, stallAttempts))
+			}
+			lastErr = a.downloadFromStreams(ctx, ffmpeg, streams, item, outputPath, index+1, total, displayName,
+				usedStreams, attempt < stallAttempts)
+			if lastErr == nil || ctx.Err() != nil || !errors.Is(lastErr, errStalled) {
 				break
 			}
-			identity := streamIdentity(stream.URL)
-			if previousEpisode, exists := usedStreams[identity]; exists && previousEpisode != displayName {
-				lastErr = fmt.Errorf("server trả lại cùng link đã dùng cho %s", previousEpisode)
-				wailsruntime.EventsEmit(a.ctx, "download:log", fmt.Sprintf("%s — bỏ qua link trùng với %s", displayName, previousEpisode))
-				continue
-			}
-			wailsruntime.EventsEmit(a.ctx, "download:log", fmt.Sprintf("%s — thử server %s: %s", displayName, displayServer(stream), stream.URL))
-			lastErr = a.downloadStream(ctx, ffmpeg, stream.URL, item.PageURL, outputPath, index+1, total, displayName)
-			if lastErr == nil {
-				usedStreams[identity] = displayName
-				break
-			}
-			wailsruntime.EventsEmit(a.ctx, "download:log", fmt.Sprintf("%s — server lỗi: %v", displayName, lastErr))
 		}
+		// Links from the episode index go stale (typically HTTP 404). When every
+		// known server has failed, ask the episode page for fresh ones.
+		if lastErr != nil && ctx.Err() == nil && len(knownStreams(item)) > 0 && item.PageURL != "" {
+			fresh, refreshErr := a.resolveStreamsFromPage(item, request.PreferredServer)
+			if refreshErr != nil {
+				wailsruntime.EventsEmit(a.ctx, "download:log",
+					fmt.Sprintf("%s — không lấy được link mới từ trang tập: %v", displayName, refreshErr))
+			} else if unseen := newStreams(fresh, streams); len(unseen) > 0 {
+				wailsruntime.EventsEmit(a.ctx, "download:log",
+					fmt.Sprintf("%s — thử lại với %d link mới lấy từ trang tập.", displayName, len(unseen)))
+				event.Message = "Thử link mới từ trang tập"
+				wailsruntime.EventsEmit(a.ctx, "download:queue", event)
+				lastErr = a.downloadFromStreams(ctx, ffmpeg, unseen, item, outputPath, index+1, total, displayName,
+					usedStreams, false)
+			}
+		}
+		event.Message = ""
 		if ctx.Err() != nil {
 			break
 		}
@@ -251,14 +283,53 @@ func (a *App) runQueue(ctx context.Context, ffmpeg string, request DownloadReque
 	})
 }
 
-func (a *App) resolveStreams(item DownloadItem, preferred string) ([]MediaStream, error) {
-	if item.StreamURL != "" {
-		streams := extractMedia(item.StreamURL, item.PageURL)
-		if len(streams) == 0 {
-			return nil, fmt.Errorf("URL video không hợp lệ")
+// downloadFromStreams walks the servers of one episode and stops at the first
+// one that produces a file. A stall is reported back so the caller can retry.
+func (a *App) downloadFromStreams(ctx context.Context, ffmpeg string, streams []MediaStream, item DownloadItem,
+	outputPath string, index, total int, displayName string, usedStreams map[string]string, stopOnStall bool) error {
+	var lastErr error
+	for _, stream := range streams {
+		if ctx.Err() != nil {
+			break
 		}
-		return streams, nil
+		identity := streamIdentity(stream.URL)
+		if previousEpisode, exists := usedStreams[identity]; exists && previousEpisode != displayName {
+			lastErr = fmt.Errorf("server trả lại cùng link đã dùng cho %s", previousEpisode)
+			wailsruntime.EventsEmit(a.ctx, "download:log", fmt.Sprintf("%s — bỏ qua link trùng với %s", displayName, previousEpisode))
+			continue
+		}
+		wailsruntime.EventsEmit(a.ctx, "download:log", fmt.Sprintf("%s — thử server %s: %s", displayName, displayServer(stream), stream.URL))
+		lastErr = a.downloadStream(ctx, ffmpeg, stream.URL, item.PageURL, outputPath, item.ID, index, total, displayName)
+		if lastErr == nil {
+			usedStreams[identity] = displayName
+			return nil
+		}
+		wailsruntime.EventsEmit(a.ctx, "download:log", fmt.Sprintf("%s — server lỗi: %v", displayName, lastErr))
+		if stopOnStall && errors.Is(lastErr, errStalled) {
+			// Let the caller restart this episode instead of burning the other
+			// servers on what is usually a temporary network stall. On the last
+			// attempt the remaining servers are tried instead.
+			return lastErr
+		}
 	}
+	return lastErr
+}
+
+func (a *App) resolveStreams(item DownloadItem, preferred string) ([]MediaStream, error) {
+	// Links carried by the episode index cover every server of the host, so try
+	// them before spending a request on the episode page.
+	if candidates := knownStreams(item); len(candidates) > 0 {
+		return preferServer(candidates, preferred), nil
+	}
+	if item.PageURL == "" {
+		return nil, fmt.Errorf("tập không có URL trang")
+	}
+	return a.resolveStreamsFromPage(item, preferred)
+}
+
+// resolveStreamsFromPage reads the episode page itself, which is where fresh
+// signed URLs come from when the ones in the index have expired.
+func (a *App) resolveStreamsFromPage(item DownloadItem, preferred string) ([]MediaStream, error) {
 	if item.PageURL == "" {
 		return nil, fmt.Errorf("tập không có URL trang")
 	}
@@ -276,26 +347,64 @@ func (a *App) resolveStreams(item DownloadItem, preferred string) ([]MediaStream
 	if len(streams) == 0 {
 		return nil, fmt.Errorf("không tìm thấy video trong trang tập")
 	}
-	if preferred != "" {
-		sort.SliceStable(streams, func(i, j int) bool {
-			iPreferred := strings.EqualFold(streams[i].Server, preferred)
-			jPreferred := strings.EqualFold(streams[j].Server, preferred)
-			return iPreferred && !jPreferred
-		})
-	}
-	return streams, nil
+	return preferServer(streams, preferred), nil
 }
 
-func (a *App) downloadStream(ctx context.Context, ffmpeg, mediaURL, referer, outputPath string, index, total int, name string) error {
+// knownStreams normalizes the candidates already attached to the item.
+func knownStreams(item DownloadItem) []MediaStream {
+	result := make([]MediaStream, 0, len(item.Streams)+1)
+	for _, stream := range append(item.Streams, MediaStream{URL: item.StreamURL, Server: "", Kind: ""}) {
+		if strings.TrimSpace(stream.URL) == "" {
+			continue
+		}
+		for _, parsed := range extractMedia(stream.URL, item.PageURL) {
+			if stream.Server != "" {
+				parsed.Server = stream.Server
+			}
+			if !containsStreamURL(result, parsed.URL) {
+				result = append(result, parsed)
+			}
+		}
+	}
+	return result
+}
+
+// newStreams keeps only the candidates that were not tried already.
+func newStreams(candidates, tried []MediaStream) []MediaStream {
+	result := make([]MediaStream, 0, len(candidates))
+	for _, candidate := range candidates {
+		if !containsStreamURL(tried, candidate.URL) && !containsStreamURL(result, candidate.URL) {
+			result = append(result, candidate)
+		}
+	}
+	return result
+}
+
+func preferServer(streams []MediaStream, preferred string) []MediaStream {
+	if preferred == "" {
+		return streams
+	}
+	sort.SliceStable(streams, func(i, j int) bool {
+		iPreferred := strings.EqualFold(streams[i].Server, preferred)
+		jPreferred := strings.EqualFold(streams[j].Server, preferred)
+		return iPreferred && !jPreferred
+	})
+	return streams
+}
+
+func (a *App) downloadStream(ctx context.Context, ffmpeg, mediaURL, referer, outputPath, episodeID string, index, total int, name string) error {
 	partial := strings.TrimSuffix(outputPath, filepath.Ext(outputPath)) + ".part.mp4"
 	_ = os.Remove(partial)
 	if referer == "" {
 		referer = mediaURL
 	}
 	args := []string{
-		"-y", "-hide_banner", "-loglevel", "warning", "-nostats", "-progress", "pipe:2",
+		// "info" keeps the input header, which carries the total duration used
+		// for the per-episode progress bar.
+		"-y", "-hide_banner", "-loglevel", "info", "-nostats", "-progress", "pipe:2",
 		"-user_agent", browserUserAgent,
 		"-referer", referer,
+		"-rw_timeout", "20000000",
 		"-i", mediaURL,
 		"-map", "0:v:0?", "-map", "0:a?", "-c", "copy", "-movflags", "+faststart", partial,
 	}
@@ -310,32 +419,64 @@ func (a *App) downloadStream(ctx context.Context, ffmpeg, mediaURL, referer, out
 	}
 	a.setActiveFFmpeg(command.Process)
 	defer a.clearActiveFFmpeg(command.Process)
+	if superviseErr := superviseProcess(command.Process); superviseErr != nil {
+		wailsruntime.EventsEmit(a.ctx, "download:log", fmt.Sprintf("%s — %v", name, superviseErr))
+	}
+
+	watchdog := a.watchStall(command.Process, name)
 	lastLines := make([]string, 0, 12)
 	lastProgress := time.Time{}
+	durationSeconds := 0.0
+	currentSeconds := -1.0
 	scanner := bufio.NewScanner(stderr)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if len(lastLines) == cap(lastLines) {
-			lastLines = lastLines[1:]
+		if !ffmpegProgressKey.MatchString(line) {
+			if len(lastLines) == cap(lastLines) {
+				lastLines = lastLines[1:]
+			}
+			lastLines = append(lastLines, line)
 		}
-		lastLines = append(lastLines, line)
-		if time.Since(lastProgress) > 300*time.Millisecond {
-			timeMatch := ffmpegTimePattern.FindStringSubmatch(line)
-			if len(timeMatch) > 1 {
-				speed := ""
-				if speedMatch := ffmpegSpeedPattern.FindStringSubmatch(line); len(speedMatch) > 1 {
-					speed = speedMatch[1]
-				}
-				wailsruntime.EventsEmit(a.ctx, "download:progress", ProgressEvent{Index: index, Total: total, Name: name, Time: timeMatch[1], Speed: speed})
-				lastProgress = time.Now()
+		if durationSeconds == 0 {
+			if durationMatch := ffmpegDurationPattern.FindStringSubmatch(line); len(durationMatch) > 1 {
+				durationSeconds = clockSeconds(durationMatch[1])
 			}
 		}
+		timeMatch := ffmpegTimePattern.FindStringSubmatch(line)
+		if len(timeMatch) < 2 {
+			continue
+		}
+		// Only a moving decode position counts as progress; FFmpeg keeps
+		// printing the same block while it is stuck on a dead segment.
+		if seconds := clockSeconds(timeMatch[1]); seconds > currentSeconds {
+			currentSeconds = seconds
+			watchdog.progressed()
+		}
+		if time.Since(lastProgress) <= 300*time.Millisecond {
+			continue
+		}
+		speed := ""
+		if speedMatch := ffmpegSpeedPattern.FindStringSubmatch(line); len(speedMatch) > 1 {
+			speed = speedMatch[1]
+		}
+		wailsruntime.EventsEmit(a.ctx, "download:progress", ProgressEvent{
+			ID: episodeID, Index: index, Total: total, Name: name,
+			Time: humanClock(currentSeconds), Speed: speed,
+			Duration: humanClock(durationSeconds),
+			Percent:  progressPercent(currentSeconds, durationSeconds),
+		})
+		lastProgress = time.Now()
 	}
 	err = command.Wait()
+	stalled := watchdog.stop()
 	if ctx.Err() != nil {
 		_ = os.Remove(partial)
 		return ctx.Err()
+	}
+	if stalled {
+		_ = os.Remove(partial)
+		return fmt.Errorf("%w: không có tiến triển trong %s", errStalled, stallTimeout)
 	}
 	if err != nil {
 		_ = os.Remove(partial)
@@ -355,6 +496,116 @@ func (a *App) downloadStream(ctx context.Context, ffmpeg, mediaURL, referer, out
 		return err
 	}
 	return nil
+}
+
+// stallGuard kills FFmpeg when the decode position stops moving. Pausing the
+// queue suspends the process on purpose, so those seconds never count.
+type stallGuard struct {
+	mu      sync.Mutex
+	last    time.Time
+	stalled bool
+	done    chan struct{}
+	closed  bool
+}
+
+func (a *App) watchStall(process *os.Process, name string) *stallGuard {
+	guard := &stallGuard{last: time.Now(), done: make(chan struct{})}
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-guard.done:
+				return
+			case <-ticker.C:
+				if a.isPaused() {
+					guard.progressed()
+					continue
+				}
+				guard.mu.Lock()
+				idle := time.Since(guard.last)
+				guard.mu.Unlock()
+				if idle < stallTimeout {
+					continue
+				}
+				guard.mu.Lock()
+				guard.stalled = true
+				guard.mu.Unlock()
+				wailsruntime.EventsEmit(a.ctx, "download:log",
+					fmt.Sprintf("%s — treo %.0f giây không tiến triển, đang tắt FFmpeg để tải lại.", name, idle.Seconds()))
+				_ = killProcessTree(process)
+				return
+			}
+		}
+	}()
+	return guard
+}
+
+func (g *stallGuard) progressed() {
+	g.mu.Lock()
+	g.last = time.Now()
+	g.mu.Unlock()
+}
+
+// stop ends the watchdog and reports whether it had to kill FFmpeg.
+func (g *stallGuard) stop() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.closed {
+		close(g.done)
+		g.closed = true
+	}
+	return g.stalled
+}
+
+func (a *App) isPaused() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.paused
+}
+
+// clockSeconds turns an FFmpeg HH:MM:SS.mmm stamp into seconds; unusable values
+// such as "N/A" or the negative placeholder emitted at startup give -1.
+func clockSeconds(value string) float64 {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.HasPrefix(value, "-") || strings.EqualFold(value, "N/A") {
+		return -1
+	}
+	parts := strings.Split(value, ":")
+	if len(parts) != 3 {
+		return -1
+	}
+	hours, hoursErr := strconv.ParseFloat(parts[0], 64)
+	minutes, minutesErr := strconv.ParseFloat(parts[1], 64)
+	seconds, secondsErr := strconv.ParseFloat(parts[2], 64)
+	if hoursErr != nil || minutesErr != nil || secondsErr != nil {
+		return -1
+	}
+	return hours*3600 + minutes*60 + seconds
+}
+
+func humanClock(seconds float64) string {
+	if seconds <= 0 {
+		return ""
+	}
+	whole := int(seconds)
+	if whole >= 3600 {
+		return fmt.Sprintf("%d:%02d:%02d", whole/3600, (whole%3600)/60, whole%60)
+	}
+	return fmt.Sprintf("%d:%02d", whole/60, whole%60)
+}
+
+// progressPercent returns -1 when the duration is unknown, so the interface can
+// fall back to an indeterminate bar instead of showing a wrong number.
+func progressPercent(current, duration float64) float64 {
+	if current < 0 || duration <= 0 {
+		return -1
+	}
+	percent := current / duration * 100
+	if percent > 100 {
+		percent = 100
+	}
+	return float64(int(percent*10)) / 10
 }
 
 func displayServer(stream MediaStream) string {

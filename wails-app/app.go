@@ -20,18 +20,21 @@ import (
 const ffmpegDownloadURL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 
 type App struct {
-	ctx          context.Context
-	settings     *settingsStore
-	autoLog      *autoLogger
-	mu           sync.Mutex
-	downloading  bool
-	cancel       context.CancelFunc
-	activeFFmpeg *os.Process
-	paused       bool
+	ctx           context.Context
+	settings      *settingsStore
+	autoLog       *autoLogger
+	session       *sessionStore
+	mu            sync.Mutex
+	downloading   bool
+	cancel        context.CancelFunc
+	activeFFmpeg  *os.Process
+	paused        bool
+	shutdownAt    time.Time
+	shutdownTimer *time.Timer
 }
 
 func NewApp() *App {
-	return &App{settings: newSettingsStore(), autoLog: newAutoLogger()}
+	return &App{settings: newSettingsStore(), autoLog: newAutoLogger(), session: newSessionStore()}
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -40,6 +43,14 @@ func (a *App) startup(ctx context.Context) {
 
 func (a *App) shutdown(ctx context.Context) {
 	a.CancelDownload()
+	// Cancelling asks FFmpeg to stop; killing makes sure a hung process cannot
+	// keep running after the window is gone.
+	a.mu.Lock()
+	process := a.activeFFmpeg
+	a.mu.Unlock()
+	if process != nil {
+		_ = killProcessTree(process)
+	}
 	a.autoLog.close()
 }
 
@@ -52,9 +63,96 @@ func (a *App) GetInitialState() InitialState {
 		FFmpegPath:    ffmpeg,
 		Platform:      runtime.GOOS,
 		Version:       appVersion,
+		BuildDate:     appBuildDate,
 		LogDir:        a.autoLog.directory(),
 		LogPath:       a.autoLog.currentPath(),
+		CanShutdown:   runtime.GOOS == "windows" || runtime.GOOS == "darwin",
 	}
+}
+
+// SaveSession stores the current list so an interrupted queue can be reopened.
+func (a *App) SaveSession(state SessionState) error {
+	return a.session.save(state)
+}
+
+// GetSavedSession returns the stored list together with its outcome counts; the
+// interface uses the summary to decide whether to ask about reopening it.
+func (a *App) GetSavedSession() (SavedSession, error) {
+	state, err := a.session.load()
+	if err != nil {
+		return SavedSession{}, err
+	}
+	return SavedSession{State: state, Summary: summarizeSession(state)}, nil
+}
+
+func (a *App) ClearSession() error {
+	return a.session.clear()
+}
+
+// ScheduleShutdown powers the machine off after the queue finishes. On Windows
+// the countdown belongs to the system, so it holds even if the app is closed.
+func (a *App) ScheduleShutdown(seconds int) (ShutdownStatus, error) {
+	if seconds < 5 {
+		seconds = 5
+	}
+	if _, err := a.CancelShutdown(); err != nil {
+		return ShutdownStatus{}, err
+	}
+	delay := time.Duration(seconds) * time.Second
+	if systemHandlesShutdownDelay {
+		if err := scheduleSystemShutdown(delay); err != nil {
+			return ShutdownStatus{}, err
+		}
+	} else {
+		timer := time.AfterFunc(delay, func() {
+			if err := scheduleSystemShutdown(0); err != nil {
+				wailsruntime.EventsEmit(a.ctx, "download:log", err.Error())
+			}
+		})
+		a.mu.Lock()
+		a.shutdownTimer = timer
+		a.mu.Unlock()
+	}
+	a.mu.Lock()
+	a.shutdownAt = time.Now().Add(delay)
+	a.mu.Unlock()
+	return a.GetShutdownStatus(), nil
+}
+
+func (a *App) CancelShutdown() (ShutdownStatus, error) {
+	a.mu.Lock()
+	timer := a.shutdownTimer
+	wasScheduled := !a.shutdownAt.IsZero()
+	a.shutdownTimer = nil
+	a.shutdownAt = time.Time{}
+	a.mu.Unlock()
+	if timer != nil {
+		timer.Stop()
+	}
+	if wasScheduled && systemHandlesShutdownDelay {
+		if err := cancelSystemShutdown(); err != nil {
+			return ShutdownStatus{}, err
+		}
+	}
+	return ShutdownStatus{SurvivesAppExit: systemHandlesShutdownDelay}, nil
+}
+
+func (a *App) GetShutdownStatus() ShutdownStatus {
+	a.mu.Lock()
+	at := a.shutdownAt
+	a.mu.Unlock()
+	status := ShutdownStatus{SurvivesAppExit: systemHandlesShutdownDelay}
+	if at.IsZero() {
+		return status
+	}
+	remaining := int(time.Until(at).Seconds())
+	if remaining < 0 {
+		remaining = 0
+	}
+	status.Scheduled = true
+	status.Seconds = remaining
+	status.At = at.Format("15:04:05")
+	return status
 }
 
 func (a *App) AnalyzeSource(source string) (AnalysisResult, error) {
@@ -118,8 +216,10 @@ func analyzeDocument(source, fallbackURL, label string) (AnalysisResult, error) 
 		result.Episodes = episodes
 	}
 	// Movie landing pages have no current player. Ignore media URLs from
-	// unrelated recommendation cards rendered in the same HTML document.
-	if episodeNumber(pageURL) == 0 {
+	// unrelated recommendation cards rendered in the same HTML document. Host
+	// variants spell the player segment differently, so ask the URL helper
+	// instead of looking for a bare number.
+	if !isEpisodePage(pageURL) {
 		result.Streams = []MediaStream{}
 	}
 	return result, nil
@@ -136,13 +236,15 @@ func analyzeHTML(source, fallbackURL, label string) (AnalysisResult, error) {
 	}
 	episodes := extractEpisodeLinks(source, pageURL)
 	if len(episodes) == 0 {
-		number := episodeNumber(pageURL)
-		name := "Video"
-		if number > 0 {
-			name = fmt.Sprintf("Tập %02d", number)
+		// Name the lone entry the same way the list would, so a saved session
+		// keeps matching it after a restart.
+		_, number, isEpisode := episodePathSegment(pageURL)
+		identity, name := "current", "Video"
+		if isEpisode {
+			identity, name = episodeIdentity(number), episodeDisplayName(number)
 		}
 		episodes = []Episode{{
-			ID:        "current",
+			ID:        identity,
 			Name:      name,
 			Number:    number,
 			PageURL:   pageURL,

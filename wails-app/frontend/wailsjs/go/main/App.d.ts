@@ -10,13 +10,21 @@ export function AppendLog(arg1:string):Promise<string>;
 
 export function CancelDownload():Promise<void>;
 
+export function CancelShutdown():Promise<main.ShutdownStatus>;
+
 export function ChooseFFmpeg():Promise<main.FFmpegStatus>;
+
+export function ClearSession():Promise<void>;
 
 export function GetFFmpegStatus():Promise<main.FFmpegStatus>;
 
 export function GetInitialState():Promise<main.InitialState>;
 
 export function GetLogPath():Promise<string>;
+
+export function GetSavedSession():Promise<main.SavedSession>;
+
+export function GetShutdownStatus():Promise<main.ShutdownStatus>;
 
 export function InstallFFmpeg():Promise<main.FFmpegStatus>;
 
@@ -31,6 +39,10 @@ export function RememberOutputDirectory(arg1:string):Promise<void>;
 export function RevealFile(arg1:string):Promise<void>;
 
 export function SaveLog(arg1:string):Promise<string>;
+
+export function SaveSession(arg1:main.SessionState):Promise<void>;
+
+export function ScheduleShutdown(arg1:number):Promise<main.ShutdownStatus>;
 
 export function SelectOutputDirectory():Promise<string>;
 

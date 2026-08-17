@@ -15,8 +15,13 @@ Quy trình sử dụng:
 
 1. Dán một hoặc nhiều URL (mỗi URL một dòng) rồi chọn **Phân tích & thêm**. Từng link được xử lý tuần tự và thêm vào danh sách hiện có. Có thể dùng **Mở file HTML** hoặc **Dán HTML** nếu trang chặn tải tự động.
 2. Mỗi phim được hiển thị thành một nhóm riêng cùng toàn bộ tập và vị trí lưu. Có thể chọn từng tập, từng phim hoặc dùng checkbox **Chọn tất cả**. Bấm vào tên phim hoặc nút mũi tên để thu gọn/mở rộng danh sách tập của nhóm đó; nút **Thu gọn tất cả** gập toàn bộ danh sách. Khi thu gọn, dòng tiêu đề vẫn hiện số tập hoàn tất, bỏ qua và lỗi.
-3. Chọn các phim cần thiết rồi bấm **Chọn** ở mục thư mục lưu. Thư mục mới chỉ áp dụng cho những phim đang chọn và được ghi nhớ cho lần mở tiếp theo.
-4. Cài/chọn FFmpeg ở lần đầu, sau đó bấm **Tải**. Tất cả phim và tập được tải lần lượt; server khác sẽ được thử nếu server ưu tiên lỗi.
+3. Chọn thư mục lưu theo ba mức: nút **Chọn** ở khung thiết lập áp cho mọi phim đang chọn, nút 📁 ở dòng phim áp cho riêng phim đó, nút 📁 ở dòng tập chỉ áp cho tập đó. Thư mục của tập luôn được ưu tiên hơn thư mục của phim.
+4. Cài/chọn FFmpeg ở lần đầu, sau đó bấm **Tải**. Tất cả phim và tập được tải lần lượt; server khác sẽ được thử nếu server ưu tiên lỗi. Có thể bật **Tắt máy khi tải xong** — máy tắt sau 60 giây kể từ lúc hàng đợi kết thúc và luôn có nút hủy.
+5. Thẻ **Kết quả** bên cạnh **Nhật ký** liệt kê theo từng phim: tập nào hoàn tất (kèm nơi lưu), tập nào lỗi (kèm lý do), tập nào chưa tải; có bộ lọc chỉ hiện lỗi và nút chọn đúng các tập lỗi để tải lại.
+
+Nút **❔ Hướng dẫn** trên thanh tiêu đề mở phần trợ giúp trong ứng dụng: các bước sử dụng, danh sách nguồn được hỗ trợ, phiên bản và ngày build.
+
+Danh sách phim được ghi nhớ vào `%APPDATA%\MotchillDownloader\session.json` cùng thư mục lưu và kết quả từng tập. Nếu lần trước còn tập lỗi hoặc chưa tải, lần mở kế tiếp ứng dụng sẽ hỏi có mở lại danh sách đó không.
 
 Nhật ký được **lưu tự động**: mỗi dòng hiện trên màn hình đều được ghi ngay xuống file nên không mất log khi ứng dụng đóng đột ngột. Mỗi lần bấm **Tải** sẽ mở một file mới trong:
 
@@ -25,8 +30,33 @@ Nhật ký được **lưu tự động**: mỗi dòng hiện trên màn hình �
 
 Nút **📂 Thư mục log** mở thư mục này, nút **💾 Lưu bản sao** xuất thêm một bản ra vị trí tự chọn. Ứng dụng chỉ giữ lại 20 file log gần nhất. Nhật ký bao gồm phiên bản ứng dụng, lúc bắt đầu và kết quả của từng tập, thông báo lỗi cùng đường dẫn file đầu ra. Log được lưu dạng UTF-8 để hiển thị đúng tiếng Việt trên Windows và macOS.
 
+Mỗi tập đang tải có thanh tiến độ riêng kèm phần trăm, thời lượng đã xử lý và tốc độ. Khi không đọc được tổng thời lượng, thanh chuyển sang dạng chạy liên tục thay vì hiện số phần trăm sai.
+
+**Nhiều server cho mỗi tập:** danh sách tập gom link của **tất cả** server mà host cung cấp, xếp server của trang đang mở lên đầu. Một server trả 404 thì tập đó tự chuyển sang server khác; khi mọi server đã lưu đều lỗi, ứng dụng mở lại trang tập để lấy link mới rồi thử tiếp. Ô **Server ưu tiên** liệt kê mọi server tìm được nên có thể ép dùng một server cụ thể.
+
+**Chống treo:** nếu FFmpeg không tiến triển thêm giây nào trong 90 giây (không tính lúc đang tạm dừng), tiến trình bị tắt và tập đó được tải lại, tối đa 3 lần trước khi thử server khác. Tiến trình FFmpeg được gắn vào job object của Windows nên không thể sống sót khi ứng dụng đóng hoặc bị tắt đột ngột.
+
 Tùy chọn **Bỏ qua file đã có** cho phép tiếp tục một bộ đang tải dở mà không tải lại các tập hoàn chỉnh.
 Ứng dụng đọc `episodeVariants` của từng trang tập, kiểm tra canonical, URL stream và fingerprint đầu ra; nếu hai tập trả về cùng video, bản trùng bị từ chối thay vì được lưu nhầm.
+
+## Nguồn được hỗ trợ
+
+Ngoài `motchill`, ứng dụng nhận các host cùng mã nguồn như `motchill.credit`, `motphimchill.cc`, `motphimchilll.me`, `phimmoichill.hair`. Chúng chỉ khác nhau ở dạng URL, và cả bốn dạng dưới đây đều được xử lý qua cùng một bộ nhận diện:
+
+| Dạng link | Ví dụ |
+| --- | --- |
+| Trang phim | `/phim/xieu-long-giang-sinh`, `/phim/luc-luong-tinh-nhue` |
+| Tập kèm server | `/phim/xac-song-thanh-pho-chet-phan-3/tap-1-sv-0` |
+| Tập kèm mã số | `/phim/bao-mau-bi-mat-cua-tieu-thu/tap-1-3097673` |
+| Phim lẻ, có hậu tố ngôn ngữ | `/xem-phim/khu-rung-bi-tham/tap-full/vietsub` |
+
+Link từng tập được dựng lại từ đúng `slug` mà host trả về nên không bị đoán sai thành `tap-N`; đoạn đánh dấu tập được nhận theo từng segment nên slug phim có sẵn số (`…-phan-3`) không bị hiểu nhầm là số tập. Ngoài họ Motchill, mọi trang có `.m3u8`, `.mpd` hoặc video trực tiếp đều dùng được, kể cả khi phải **Mở file HTML** / **Dán HTML**.
+
+Muốn kiểm tra thật với các host này (cần mạng):
+
+```bash
+cd wails-app && MOTCHILL_LIVE_HOSTS="https://motphimchill.cc/phim/xieu-long-giang-sinh|https://motchill.credit/phim/xac-song-thanh-pho-chet-phan-3/tap-1-sv-0" go test -run TestLiveHostVariants -v
+```
 
 ## Dữ liệu cục bộ
 

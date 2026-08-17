@@ -21,12 +21,24 @@ var (
 	absoluteURLPattern = regexp.MustCompile(`(?i)https?://[^\s"'<>\\\[\]{}]+`)
 	attributePattern   = regexp.MustCompile(`(?i)(?:src|file|source|url)\s*[:=]\s*["']([^"']+)["']`)
 	unicodePattern     = regexp.MustCompile(`\\u([0-9a-fA-F]{4})`)
-	episodeNumberRE    = regexp.MustCompile(`(?i)(?:tap|tập|episode|ep)[-_]?(\d+)`)
+	episodeNumberRE    = regexp.MustCompile(`(?i)(?:tap|tập|episode|ep)[-_.\s]*(\d+)`)
+	// Motchill variants name the player segment "tap-1", "tap-1-sv-0",
+	// "tap-1-3097673" or "tap-full"; only a whole segment counts so a movie slug
+	// that happens to contain "tap-2" is not mistaken for an episode.
+	episodeSegmentRE = regexp.MustCompile(`(?i)^(?:tap|tập|episode|ep)[-_.\s]*(\d+|full)\b`)
+	// Language and quality tails that sit after the episode segment on some hosts.
+	episodeTailSegments = map[string]bool{
+		"vietsub": true, "thuyet-minh": true, "thuyet-minh-vietsub": true, "long-tieng": true,
+		"sub": true, "tm": true, "lt": true, "full-hd": true, "hd": true,
+	}
 	titlePattern       = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
 	canonicalPattern   = regexp.MustCompile(`(?i)<link[^>]+rel\s*=\s*["']canonical["'][^>]+href\s*=\s*["'](https?://[^"']+)`)
 	ogURLPattern       = regexp.MustCompile(`(?i)<meta[^>]+property\s*=\s*["']og:url["'][^>]+content\s*=\s*["'](https?://[^"']+)`)
 	hrefPattern        = regexp.MustCompile(`(?i)href\s*=\s*["']([^"']+)["']`)
-	movieIDPattern     = regexp.MustCompile(`(?i)["']movieId["']\s*:\s*["']?(\d+)`)
+	movieIDPattern     = regexp.MustCompile(`(?i)["'](?:movieId|movie_id)["']\s*:\s*["']?(\d+)`)
+	// Trailing site name on the page title, e.g. "… - Motchill",
+	// "… | Motphimchill", "… - PhimmoiChill".
+	titleSitePattern = regexp.MustCompile(`(?i)\s*[-|–]\s*[\p{L}\d .]*chill[\p{L}\d .]*$`)
 )
 
 var mediaExtensions = map[string]string{
@@ -245,7 +257,9 @@ func extractTitle(source string) string {
 	title := strings.TrimSpace(regexp.MustCompile(`\s+`).ReplaceAllString(html.UnescapeString(match[1]), " "))
 	title = regexp.MustCompile(`(?i)^xem\s+phim\s+`).ReplaceAllString(title, "")
 	title = regexp.MustCompile(`(?i)\s+(tập|episode)\s+\d+.*$`).ReplaceAllString(title, "")
-	title = regexp.MustCompile(`(?i)\s*[-|]\s*motchill.*$`).ReplaceAllString(title, "")
+	// Every host in the family ends its title with its own name.
+	title = titleSitePattern.ReplaceAllString(title, "")
+	title = strings.TrimSpace(strings.TrimRight(strings.TrimSpace(title), "-|–"))
 	if title == "" {
 		return "Video"
 	}
@@ -268,17 +282,13 @@ func extractEpisodeLinks(source, pageURL string) []Episode {
 	if err != nil || base.Scheme == "" || base.Host == "" {
 		return nil
 	}
-	currentNumber := episodeNumber(base.Path)
-	segments := strings.Split(strings.Trim(base.Path, "/"), "/")
-	if len(segments) < 2 {
+	currentSegment, _, _ := episodePathSegment(base.Path)
+	seriesPath := seriesPathOf(base.Path)
+	if strings.Count(seriesPath, "/") < 2 {
 		return nil
 	}
-	if episodeNumber(segments[len(segments)-1]) > 0 {
-		segments = segments[:len(segments)-1]
-	}
-	seriesPath := "/" + strings.Join(segments, "/")
 	seen := map[string]bool{}
-	result := make([]Episode, 0)
+	byNumber := map[int]Episode{}
 	for _, match := range hrefPattern.FindAllStringSubmatch(normalizeHTML(source), -1) {
 		if len(match) < 2 {
 			continue
@@ -291,18 +301,30 @@ func extractEpisodeLinks(source, pageURL string) []Episode {
 		if !strings.EqualFold(absolute.Host, base.Host) || !strings.HasPrefix(absolute.Path, seriesPath+"/") {
 			continue
 		}
-		number := episodeNumber(absolute.Path)
-		if number <= 0 || seen[absolute.String()] {
+		segment, number, found := episodePathSegment(absolute.Path)
+		if !found || seen[absolute.String()] {
 			continue
 		}
 		seen[absolute.String()] = true
-		result = append(result, Episode{
-			ID:      fmt.Sprintf("episode-%d", number),
-			Name:    fmt.Sprintf("Tập %02d", number),
+		episode := Episode{
+			ID:      episodeIdentity(number),
+			Name:    episodeDisplayName(number),
 			Number:  number,
 			PageURL: absolute.String(),
-			Current: number == currentNumber,
-		})
+			Current: segment == currentSegment,
+		}
+		// Hosts link one episode once per server ("…/tap-1-sv-0", "…/tap-1-sv-1").
+		// Keep the shortest link and let the download step walk the servers.
+		if existing, exists := byNumber[number]; exists {
+			if !episode.Current && (existing.Current || len(existing.PageURL) <= len(episode.PageURL)) {
+				continue
+			}
+		}
+		byNumber[number] = episode
+	}
+	result := make([]Episode, 0, len(byNumber))
+	for _, episode := range byNumber {
+		result = append(result, episode)
 	}
 	sort.SliceStable(result, func(i, j int) bool { return result[i].Number < result[j].Number })
 	return result
@@ -315,6 +337,88 @@ func episodeNumber(value string) int {
 	}
 	number, _ := strconv.Atoi(match[1])
 	return number
+}
+
+// episodePathSegment finds the segment of a URL that marks a player page and its
+// number, where a single-part film ("tap-full") reports number 0. Motchill
+// variants differ only in what follows that segment, so every host shape —
+// /phim/slug/tap-1, /phim/slug/tap-1-sv-0, /xem-phim/slug/tap-full/vietsub —
+// resolves through this one helper.
+func episodePathSegment(value string) (string, int, bool) {
+	target := value
+	if parsed, err := url.Parse(value); err == nil && parsed.Path != "" {
+		target = parsed.Path
+	}
+	for _, segment := range strings.Split(strings.Trim(target, "/"), "/") {
+		match := episodeSegmentRE.FindStringSubmatch(segment)
+		if match == nil {
+			continue
+		}
+		number, err := strconv.Atoi(match[1])
+		if err != nil {
+			number = 0
+		}
+		return segment, number, true
+	}
+	return "", 0, false
+}
+
+// isEpisodePage separates a player page from a movie landing page. Landing pages
+// must not keep the media URLs found in recommendation cards.
+func isEpisodePage(value string) bool {
+	_, _, found := episodePathSegment(value)
+	return found
+}
+
+// seriesPathOf strips the episode segment and any language or quality tail, so
+// all episodes of one movie share a prefix regardless of host.
+func seriesPathOf(value string) string {
+	target := value
+	if parsed, err := url.Parse(value); err == nil && parsed.Path != "" {
+		target = parsed.Path
+	}
+	segments := strings.Split(strings.Trim(target, "/"), "/")
+	for index, segment := range segments {
+		if episodeSegmentRE.MatchString(segment) {
+			segments = segments[:index]
+			return "/" + strings.Join(segments, "/")
+		}
+	}
+	for len(segments) > 0 && episodeTailSegments[strings.ToLower(segments[len(segments)-1])] {
+		segments = segments[:len(segments)-1]
+	}
+	return "/" + strings.Join(segments, "/")
+}
+
+// episodeSlugNumber reads the episode number from a slug or a display name.
+// "tap-full" is a real episode, so it reports (0, true).
+func episodeSlugNumber(value string) (int, bool) {
+	value = strings.TrimSpace(value)
+	if match := episodeSegmentRE.FindStringSubmatch(value); match != nil {
+		number, err := strconv.Atoi(match[1])
+		if err != nil {
+			return 0, true
+		}
+		return number, true
+	}
+	if number := episodeNumber(value); number > 0 {
+		return number, true
+	}
+	return 0, false
+}
+
+func episodeIdentity(number int) string {
+	if number > 0 {
+		return fmt.Sprintf("episode-%d", number)
+	}
+	return "episode-full"
+}
+
+func episodeDisplayName(number int) string {
+	if number > 0 {
+		return fmt.Sprintf("Tập %02d", number)
+	}
+	return "Tập Full"
 }
 
 func extractMovieID(source string) string {
@@ -332,6 +436,65 @@ func extractMovieID(source string) string {
 		}
 	}
 	return ""
+}
+
+// otherServerIndexes lists every server except the one already handled first.
+func otherServerIndexes(count, exclude int) []int {
+	indexes := make([]int, 0, count)
+	for index := 0; index < count; index++ {
+		if index != exclude {
+			indexes = append(indexes, index)
+		}
+	}
+	return indexes
+}
+
+func isDirectStreamType(value string) bool {
+	return strings.EqualFold(value, "m3u8") || strings.EqualFold(value, "mpd")
+}
+
+func containsStreamURL(streams []MediaStream, target string) bool {
+	for _, stream := range streams {
+		if stream.URL == target {
+			return true
+		}
+	}
+	return false
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+// episodePageURL trusts the slug the site itself reports, because the suffix
+// differs per host ("tap-1", "tap-1-sv-0", "tap-1-3097673", "tap-full"). Only
+// when a record carries no slug is a plain "tap-N" built as a last resort.
+func episodePageURL(page *url.URL, seriesPath, slug string, number int) string {
+	slug = strings.TrimSpace(slug)
+	if strings.HasPrefix(strings.ToLower(slug), "http") {
+		if parsed, err := url.Parse(slug); err == nil && parsed.Host != "" {
+			return parsed.String()
+		}
+	}
+	target := *page
+	target.RawQuery = ""
+	target.Fragment = ""
+	switch {
+	case strings.HasPrefix(slug, "/"):
+		target.Path = slug
+	case slug != "":
+		target.Path = strings.TrimRight(seriesPath, "/") + "/" + strings.Trim(slug, "/")
+	case number > 0:
+		target.Path = strings.TrimRight(seriesPath, "/") + "/tap-" + strconv.Itoa(number)
+	default:
+		target.Path = strings.TrimRight(seriesPath, "/") + "/tap-full"
+	}
+	return target.String()
 }
 
 type episodeAPIResponse struct {
@@ -371,8 +534,10 @@ func fetchEpisodeIndex(pageURL, movieID string) ([]Episode, error) {
 		return nil, fmt.Errorf("API danh sách tập không có dữ liệu")
 	}
 
-	currentSlug := path.Base(strings.TrimRight(page.Path, "/"))
-	currentNumber := episodeNumber(currentSlug)
+	currentSlug, currentNumber, isPlayerPage := episodePathSegment(page.Path)
+	if !isPlayerPage {
+		currentSlug = path.Base(strings.TrimRight(page.Path, "/"))
+	}
 	selectedServer := -1
 	for serverIndex, server := range payload.Servers {
 		for _, item := range server.Items {
@@ -388,53 +553,64 @@ func fetchEpisodeIndex(pageURL, movieID string) ([]Episode, error) {
 	if selectedServer < 0 {
 		selectedServer = 0
 	}
-	items := payload.Servers[selectedServer].Items
-	seriesPath := strings.TrimRight(page.Path, "/")
-	if currentNumber > 0 {
-		seriesPath = strings.TrimSuffix(seriesPath, "/"+currentSlug)
-	}
+	seriesPath := seriesPathOf(page.Path)
 	type candidate struct {
-		item   episodeRecord
-		stream string
+		item    episodeRecord
+		streams []MediaStream
 	}
-	byNumber := map[int]candidate{}
-	for _, item := range items {
-		number := episodeNumber(item.Slug)
-		if number <= 0 {
-			number = episodeNumber(item.Name)
-		}
-		if number <= 0 {
-			continue
-		}
-		streams := extractMedia(item.Link, pageURL)
-		streamURL := ""
-		if len(streams) > 0 {
-			streamURL = streams[0].URL
-		}
-		previous, exists := byNumber[number]
-		isDirect := strings.EqualFold(item.Type, "m3u8") || strings.EqualFold(item.Type, "mpd")
-		previousDirect := strings.EqualFold(previous.item.Type, "m3u8") || strings.EqualFold(previous.item.Type, "mpd")
-		if !exists || (isDirect && !previousDirect) || (previous.stream == "" && streamURL != "") {
-			byNumber[number] = candidate{item: item, stream: streamURL}
+	byNumber := map[int]*candidate{}
+	// Every server is collected, starting with the one the open page belongs to.
+	// A single episode often lives on several servers, so one dead CDN link no
+	// longer means the episode fails.
+	for _, serverIndex := range append([]int{selectedServer}, otherServerIndexes(len(payload.Servers), selectedServer)...) {
+		server := payload.Servers[serverIndex]
+		serverName := strings.TrimSpace(server.Name)
+		for _, item := range server.Items {
+			number, found := episodeSlugNumber(item.Slug)
+			if !found {
+				number, found = episodeSlugNumber(item.Name)
+			}
+			if !found {
+				continue
+			}
+			entry := byNumber[number]
+			if entry == nil {
+				entry = &candidate{}
+				byNumber[number] = entry
+			}
+			// The record that names the episode is the first one seen, unless a
+			// later one is a direct stream and the current pick is not.
+			if entry.item.Slug == "" || (isDirectStreamType(item.Type) && !isDirectStreamType(entry.item.Type)) {
+				entry.item = item
+			}
+			for _, stream := range extractMedia(item.Link, pageURL) {
+				if stream.Server == "" {
+					stream.Server = firstNonEmpty(serverName, strings.TrimSpace(item.Server), strings.TrimSpace(item.Name))
+				}
+				if !containsStreamURL(entry.streams, stream.URL) {
+					entry.streams = append(entry.streams, stream)
+				}
+			}
 		}
 	}
 	result := make([]Episode, 0, len(byNumber))
 	for number, value := range byNumber {
 		name := strings.TrimSpace(value.item.Name)
 		if name == "" {
-			name = fmt.Sprintf("Tập %02d", number)
+			name = episodeDisplayName(number)
 		}
-		pageCopy := *page
-		pageCopy.Path = strings.TrimRight(seriesPath, "/") + "/tap-" + strconv.Itoa(number)
-		pageCopy.RawQuery = ""
-		pageCopy.Fragment = ""
+		primary := ""
+		if len(value.streams) > 0 {
+			primary = value.streams[0].URL
+		}
 		result = append(result, Episode{
-			ID:        fmt.Sprintf("episode-%d", number),
+			ID:        episodeIdentity(number),
 			Name:      name,
 			Number:    number,
-			PageURL:   pageCopy.String(),
-			StreamURL: value.stream,
-			Current:   number == currentNumber,
+			PageURL:   episodePageURL(page, seriesPath, value.item.Slug, number),
+			StreamURL: primary,
+			Streams:   value.streams,
+			Current:   number == currentNumber && isPlayerPage,
 		})
 	}
 	sort.SliceStable(result, func(i, j int) bool { return result[i].Number < result[j].Number })

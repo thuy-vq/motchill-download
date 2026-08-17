@@ -39,6 +39,7 @@ var (
 	// Trailing site name on the page title, e.g. "… - Motchill",
 	// "… | Motphimchill", "… - PhimmoiChill".
 	titleSitePattern = regexp.MustCompile(`(?i)\s*[-|–]\s*[\p{L}\d .]*chill[\p{L}\d .]*$`)
+	embedLinkPattern = regexp.MustCompile(`(?i)"link_embed"\s*:\s*"(https?:[^"]+)"`)
 )
 
 var mediaExtensions = map[string]string{
@@ -249,6 +250,44 @@ func matchingJSONBracket(value string, start int) int {
 	return -1
 }
 
+// extractEmbedLinks finds players that host the video themselves instead of
+// exposing a playlist, e.g. "link_embed":"https://embed1.streamc.xyz/embed.php…".
+func extractEmbedLinks(source string) []string {
+	decoded := strings.ReplaceAll(normalizeHTML(source), `\"`, `"`)
+	seen := map[string]bool{}
+	result := make([]string, 0)
+	for _, match := range embedLinkPattern.FindAllStringSubmatch(decoded, -1) {
+		value := strings.TrimSpace(match[1])
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
+// embedHosts names the embed providers of a page for the error shown to the user.
+func embedHosts(embeds []string) string {
+	seen := map[string]bool{}
+	hosts := make([]string, 0, len(embeds))
+	for _, embed := range embeds {
+		parsed, err := url.Parse(embed)
+		if err != nil || parsed.Host == "" || seen[parsed.Host] {
+			continue
+		}
+		seen[parsed.Host] = true
+		hosts = append(hosts, parsed.Host)
+	}
+	return strings.Join(hosts, ", ")
+}
+
+// embedOnlyError explains why a page with a player still has nothing to download.
+func embedOnlyError(embeds []string) error {
+	return fmt.Errorf("tập này chỉ phát qua trình nhúng %s và playlist của nó được mã hóa riêng, "+
+		"FFmpeg không đọc được; hãy thử server khác hoặc nguồn khác", embedHosts(embeds))
+}
+
 func extractTitle(source string) string {
 	match := titlePattern.FindStringSubmatch(normalizeHTML(source))
 	if len(match) < 2 {
@@ -287,6 +326,9 @@ func extractEpisodeLinks(source, pageURL string) []Episode {
 	if strings.Count(seriesPath, "/") < 2 {
 		return nil
 	}
+	// Matching on the movie slug rather than the whole prefix, because hosts list
+	// a movie under /phim/<slug> but play it under /xem-phim/<slug>/tap-N/….
+	slug := strings.ToLower(path.Base(seriesPath))
 	seen := map[string]bool{}
 	byNumber := map[int]Episode{}
 	for _, match := range hrefPattern.FindAllStringSubmatch(normalizeHTML(source), -1) {
@@ -298,7 +340,7 @@ func extractEpisodeLinks(source, pageURL string) []Episode {
 			continue
 		}
 		absolute := base.ResolveReference(reference)
-		if !strings.EqualFold(absolute.Host, base.Host) || !strings.HasPrefix(absolute.Path, seriesPath+"/") {
+		if !strings.EqualFold(absolute.Host, base.Host) || !pathHasSegment(absolute.Path, slug) {
 			continue
 		}
 		segment, number, found := episodePathSegment(absolute.Path)
@@ -327,6 +369,12 @@ func extractEpisodeLinks(source, pageURL string) []Episode {
 		result = append(result, episode)
 	}
 	sort.SliceStable(result, func(i, j int) bool { return result[i].Number < result[j].Number })
+	// A single-part film is usually linked twice, once as "tap-full" and once as
+	// "tap-1". Both play the same video, so the list keeps the "full" entry only
+	// instead of offering a duplicate that later fails the sameness check.
+	if len(result) == 2 && result[0].Number == 0 && result[1].Number == 1 {
+		result = result[:1]
+	}
 	return result
 }
 
@@ -405,6 +453,20 @@ func episodeSlugNumber(value string) (int, bool) {
 		return number, true
 	}
 	return 0, false
+}
+
+// pathHasSegment reports whether a slug appears as a whole segment, so
+// "/xem-phim/gantz/tap-1" belongs to "gantz" but "/phim/gantz-2/tap-1" does not.
+func pathHasSegment(value, slug string) bool {
+	if slug == "" || slug == "." || slug == "/" {
+		return false
+	}
+	for _, segment := range strings.Split(strings.Trim(value, "/"), "/") {
+		if strings.EqualFold(segment, slug) {
+			return true
+		}
+	}
+	return false
 }
 
 func episodeIdentity(number int) string {

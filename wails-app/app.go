@@ -196,6 +196,22 @@ func analyzeDocument(source, fallbackURL, label string) (AnalysisResult, error) 
 	if pageURL == "" {
 		pageURL = fallbackURL
 	}
+	// Some hosts render the episode list as plain HTML with no player props and
+	// no episode API. The links in the page are then the only list there is, and
+	// each episode resolves its own stream when it is downloaded.
+	if analyzeErr != nil && pageURL != "" {
+		if links := extractEpisodeLinks(source, pageURL); len(links) > 0 {
+			result = AnalysisResult{
+				Title:       extractTitle(source),
+				PageURL:     pageURL,
+				Streams:     []MediaStream{},
+				Episodes:    links,
+				HTMLBytes:   len(source),
+				SourceLabel: label,
+			}
+			analyzeErr = nil
+		}
+	}
 	movieID := extractMovieID(source)
 	if movieID == "" || pageURL == "" {
 		return result, analyzeErr
@@ -232,6 +248,9 @@ func analyzeHTML(source, fallbackURL, label string) (AnalysisResult, error) {
 	}
 	streams := extractCurrentStreams(source, pageURL)
 	if len(streams) == 0 {
+		if embeds := extractEmbedLinks(source); len(embeds) > 0 {
+			return AnalysisResult{}, embedOnlyError(embeds)
+		}
 		return AnalysisResult{}, fmt.Errorf("không tìm thấy luồng .m3u8, .mpd hoặc video trực tiếp")
 	}
 	episodes := extractEpisodeLinks(source, pageURL)

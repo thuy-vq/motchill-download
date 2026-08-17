@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -253,6 +254,107 @@ func TestLiveHostVariants(t *testing.T) {
 			}
 		})
 	}
+}
+
+// motphimchill.cc/phim/gantz lists the movie under /phim/<slug> but plays it
+// under /xem-phim/<slug>/tap-N/<language>, with no player props and no episode
+// API. Requiring one shared prefix found no episodes at all.
+func TestEpisodeListWhenPlayerLivesUnderAnotherPrefix(t *testing.T) {
+	pageURL := "https://motphimchill.cc/phim/gantz"
+	links := make([]string, 0, 13)
+	for number := 1; number <= 13; number++ {
+		suffix := "?server=nc"
+		if number == 1 {
+			suffix = ""
+		}
+		links = append(links, `<a href="/xem-phim/gantz/tap-`+itoa(number)+`/vietsub`+suffix+`">Tập `+itoa(number)+`</a>`)
+	}
+	source := `<html><head><title>Gantz () 2004 Vietsub</title>` +
+		`<link rel="canonical" href="` + pageURL + `"></head><body>` +
+		strings.Join(links, "") +
+		// A recommendation card of a different movie must stay out of the list.
+		`<a href="/xem-phim/gantz-2/tap-1/vietsub">Phim khác</a>` +
+		`</body></html>`
+
+	result, err := analyzeDocument(source, pageURL, pageURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Episodes) != 13 {
+		t.Fatalf("want 13 episodes, got %d: %#v", len(result.Episodes), result.Episodes)
+	}
+	if result.Episodes[0].Number != 1 || result.Episodes[12].Number != 13 {
+		t.Fatalf("episodes are out of order: %#v", result.Episodes)
+	}
+	if result.Episodes[0].PageURL != "https://motphimchill.cc/xem-phim/gantz/tap-1/vietsub" {
+		t.Fatalf("unexpected first episode URL: %s", result.Episodes[0].PageURL)
+	}
+	if result.Streams == nil || len(result.Streams) != 0 {
+		t.Fatalf("a landing page must report an empty stream list, got %#v", result.Streams)
+	}
+}
+
+func TestSinglePartFilmIsListedOnce(t *testing.T) {
+	// Hosts link a film both as tap-full and as tap-1; two entries for the same
+	// video made one of them fail the duplicate check after downloading twice.
+	pageURL := "https://motphimchill.cc/phim/khu-rung-bi-tham"
+	source := `<html><head><title>Khu Rừng Bi Thảm - Full - Motphimchill</title>` +
+		`<link rel="canonical" href="` + pageURL + `"></head><body>` +
+		`<a href="/xem-phim/khu-rung-bi-tham/tap-full/vietsub">Full</a>` +
+		`<a href="/xem-phim/khu-rung-bi-tham/tap-1/vietsub?server=kk">Tập 1</a>` +
+		`</body></html>`
+	episodes := extractEpisodeLinks(source, pageURL)
+	if len(episodes) != 1 || episodes[0].Number != 0 {
+		t.Fatalf("a single-part film must appear once as Tập Full, got %#v", episodes)
+	}
+
+	// A real series that also offers a compilation keeps every entry.
+	series := `<html><body>` +
+		`<a href="/xem-phim/bo/tap-full/vietsub">Full</a>` +
+		`<a href="/xem-phim/bo/tap-1/vietsub">1</a>` +
+		`<a href="/xem-phim/bo/tap-2/vietsub">2</a></body></html>`
+	if got := extractEpisodeLinks(series, "https://motphimchill.cc/phim/bo"); len(got) != 3 {
+		t.Fatalf("series entries must be kept, got %#v", got)
+	}
+}
+
+func TestEncryptedEmbedIsReportedInsteadOfAVagueError(t *testing.T) {
+	// The player only exposes an embed whose playlist is custom-encrypted, so the
+	// message must say that rather than "không tìm thấy luồng".
+	source := `<html><head><title>Gantz ()</title>` +
+		`<link rel="canonical" href="https://motphimchill.cc/xem-phim/gantz/tap-1/vietsub"></head><body>` +
+		`<script>self.push("\"video\":{\"id\":456472,\"link_embed\":\"https://embed1.streamc.xyz/embed.php?hash=dc63\",` +
+		`\"link_m3u8\":\"\",\"is_embed\":true}")</script></body></html>`
+
+	embeds := extractEmbedLinks(source)
+	if len(embeds) != 1 || !strings.Contains(embeds[0], "embed1.streamc.xyz") {
+		t.Fatalf("embed link not found: %#v", embeds)
+	}
+	if hosts := embedHosts(embeds); hosts != "embed1.streamc.xyz" {
+		t.Fatalf("embedHosts = %q", hosts)
+	}
+	_, err := analyzeHTML(source, "https://motphimchill.cc/xem-phim/gantz/tap-1/vietsub", "test")
+	if err == nil {
+		t.Fatal("expected an error for an embed-only page")
+	}
+	if !strings.Contains(err.Error(), "embed1.streamc.xyz") || !strings.Contains(err.Error(), "mã hóa") {
+		t.Fatalf("error must name the embed host and the reason, got %q", err)
+	}
+
+	// An episode that does expose link_m3u8 keeps working.
+	withPlaylist := strings.Replace(source, `\"link_m3u8\":\"\"`,
+		`\"link_m3u8\":\"https://s1.phim1280.tv/20231125/aMzxXdgf/index.m3u8\"`, 1)
+	result, err := analyzeHTML(withPlaylist, "https://motphimchill.cc/xem-phim/gantz/tap-1/vietsub", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Streams) == 0 || !strings.HasSuffix(result.Streams[0].URL, "index.m3u8") {
+		t.Fatalf("direct playlist must still be used: %#v", result.Streams)
+	}
+}
+
+func itoa(value int) string {
+	return strconv.Itoa(value)
 }
 
 func TestEpisodeIndexKeepsEveryServerAsFallback(t *testing.T) {

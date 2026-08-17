@@ -332,6 +332,9 @@ function App() {
                 added++;
             } catch (reason) {
                 failures.push(`${link}\n${errorMessage(reason)}`);
+                // Analysis failures used to live only in the error box, which
+                // left nothing in the log to look at afterwards.
+                appendLog(`Không phân tích được ${link}: ${errorMessage(reason)}`);
             }
         }
         setAnalyzing(false); setAnalyzeProgress('');

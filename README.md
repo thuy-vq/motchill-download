@@ -46,11 +46,14 @@ Ngoài `motchill`, ứng dụng nhận các host cùng mã nguồn như `motchil
 | Dạng link | Ví dụ |
 | --- | --- |
 | Trang phim | `/phim/xieu-long-giang-sinh`, `/phim/luc-luong-tinh-nhue` |
+| Trang phim, tập nằm ở prefix khác | `/phim/gantz` → `/xem-phim/gantz/tap-1/vietsub` |
 | Tập kèm server | `/phim/xac-song-thanh-pho-chet-phan-3/tap-1-sv-0` |
 | Tập kèm mã số | `/phim/bao-mau-bi-mat-cua-tieu-thu/tap-1-3097673` |
 | Phim lẻ, có hậu tố ngôn ngữ | `/xem-phim/khu-rung-bi-tham/tap-full/vietsub` |
 
-Link từng tập được dựng lại từ đúng `slug` mà host trả về nên không bị đoán sai thành `tap-N`; đoạn đánh dấu tập được nhận theo từng segment nên slug phim có sẵn số (`…-phan-3`) không bị hiểu nhầm là số tập. Ngoài họ Motchill, mọi trang có `.m3u8`, `.mpd` hoặc video trực tiếp đều dùng được, kể cả khi phải **Mở file HTML** / **Dán HTML**.
+Link từng tập được dựng lại từ đúng `slug` mà host trả về nên không bị đoán sai thành `tap-N`; đoạn đánh dấu tập được nhận theo từng segment nên slug phim có sẵn số (`…-phan-3`) không bị hiểu nhầm là số tập. Tập được nhận theo **slug phim** thay vì theo prefix, nên trang liệt kê ở `/phim/<slug>` mà phát ở `/xem-phim/<slug>/…` vẫn ra đủ danh sách; phim lẻ được link hai lần (`tap-full` và `tap-1`) chỉ hiện một tập.
+
+Không tải được: một số phim chỉ phát qua trình nhúng (ví dụ `embed1.streamc.xyz`) với playlist mã hóa riêng thay vì `.m3u8` — FFmpeg không đọc được loại này. Khi đó ứng dụng báo rõ tên trình nhúng và lý do trong nhật ký thay vì chỉ nói "không tìm thấy luồng"; hãy đổi server hoặc tìm nguồn khác. Ngoài họ Motchill, mọi trang có `.m3u8`, `.mpd` hoặc video trực tiếp đều dùng được, kể cả khi phải **Mở file HTML** / **Dán HTML**.
 
 Muốn kiểm tra thật với các host này (cần mạng):
 

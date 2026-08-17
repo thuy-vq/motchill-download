@@ -345,6 +345,9 @@ func (a *App) resolveStreamsFromPage(item DownloadItem, preferred string) ([]Med
 	}
 	streams := extractCurrentStreams(source, item.PageURL)
 	if len(streams) == 0 {
+		if embeds := extractEmbedLinks(source); len(embeds) > 0 {
+			return nil, embedOnlyError(embeds)
+		}
 		return nil, fmt.Errorf("không tìm thấy video trong trang tập")
 	}
 	return preferServer(streams, preferred), nil

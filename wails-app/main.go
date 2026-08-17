@@ -11,13 +11,17 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+// appWindowTitle is the base title; the queue prefixes it with its percentage so
+// the taskbar shows progress too.
+const appWindowTitle = "Video HTML Downloader"
+
 func main() {
 	// Create an instance of the app structure
 	app := NewApp()
 
 	// Create application with options
 	err := wails.Run(&options.App{
-		Title:     "Video HTML Downloader",
+		Title:     appWindowTitle,
 		Width:     1180,
 		Height:    820,
 		MinWidth:  900,

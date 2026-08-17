@@ -90,6 +90,14 @@ export function SelectOutputDirectory() {
   return window['go']['main']['App']['SelectOutputDirectory']();
 }
 
+export function SetProgressIndicator(arg1, arg2) {
+  return window['go']['main']['App']['SetProgressIndicator'](arg1, arg2);
+}
+
+export function ShowNotification(arg1, arg2) {
+  return window['go']['main']['App']['ShowNotification'](arg1, arg2);
+}
+
 export function StartDownload(arg1) {
   return window['go']['main']['App']['StartDownload'](arg1);
 }

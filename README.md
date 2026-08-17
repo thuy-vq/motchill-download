@@ -30,6 +30,8 @@ Nhật ký được **lưu tự động**: mỗi dòng hiện trên màn hình �
 
 Nút **📂 Thư mục log** mở thư mục này, nút **💾 Lưu bản sao** xuất thêm một bản ra vị trí tự chọn. Ứng dụng chỉ giữ lại 20 file log gần nhất. Nhật ký bao gồm phiên bản ứng dụng, lúc bắt đầu và kết quả của từng tập, thông báo lỗi cùng đường dẫn file đầu ra. Log được lưu dạng UTF-8 để hiển thị đúng tiếng Việt trên Windows và macOS.
 
+Tiến độ cũng hiện ra ngoài cửa sổ: phần trăm được ghép vào tiêu đề (`45% · Video HTML Downloader`) và vẽ thành thanh tiến độ trên nút taskbar của Windows — vàng khi tạm dừng, đỏ khi có tập lỗi. Khi hàng đợi kết thúc, ứng dụng bắn một thông báo Toast kèm số tập thành công/lỗi/bỏ qua, kể cả lúc cửa sổ đang ở dưới.
+
 Mỗi tập đang tải có thanh tiến độ riêng kèm phần trăm, thời lượng đã xử lý và tốc độ. Khi không đọc được tổng thời lượng, thanh chuyển sang dạng chạy liên tục thay vì hiện số phần trăm sai.
 
 **Nhiều server cho mỗi tập:** danh sách tập gom link của **tất cả** server mà host cung cấp, xếp server của trang đang mở lên đầu. Một server trả 404 thì tập đó tự chuyển sang server khác; khi mọi server đã lưu đều lỗi, ứng dụng mở lại trang tập để lấy link mới rồi thử tiếp. Ô **Server ưu tiên** liệt kê mọi server tìm được nên có thể ép dùng một server cụ thể.

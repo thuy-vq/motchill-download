@@ -3,7 +3,8 @@ import './App.css';
 import {
     AnalyzeHTML, AnalyzeSource, AppendLog, CancelDownload, CancelShutdown, ChooseFFmpeg, ClearSession,
     GetInitialState, GetSavedSession, InstallFFmpeg, NewLogSession, PauseDownload, OpenHTMLFile, RevealFile,
-    SaveLog, SaveSession, ScheduleShutdown, SelectOutputDirectory, StartDownload,
+    SaveLog, SaveSession, ScheduleShutdown, SelectOutputDirectory, SetProgressIndicator, ShowNotification,
+    StartDownload,
 } from '../wailsjs/go/main/App';
 import {EventsOff, EventsOn} from '../wailsjs/runtime/runtime';
 import {HelpDialog, ResultsPanel, RestoreDialog, ShutdownBanner} from './panels';
@@ -276,6 +277,11 @@ function App() {
                 ? `Đã hủy. Hoàn tất ${event.completed}/${event.total} tập.`
                 : `Xong hàng đợi: ${event.completed} thành công, ${event.failed} lỗi, ${event.skipped} bỏ qua.`);
             setSidePanel('results');
+            const summary = `${event.completed} thành công · ${event.failed} lỗi · ${event.skipped} bỏ qua`;
+            ShowNotification(
+                event.cancelled ? 'Đã dừng hàng đợi tải' : event.failed > 0 ? 'Tải xong, có tập lỗi' : 'Tải xong tất cả',
+                event.cancelled ? `Hoàn tất ${event.completed}/${event.total} tập trước khi dừng.` : summary,
+            ).catch(() => undefined);
             if (!event.cancelled) requestShutdown();
         });
         EventsOn('ffmpeg:progress', (event: {downloaded: number; total: number}) => {
@@ -540,6 +546,14 @@ function App() {
         : activeQueue && ['completed', 'skipped'].includes(activeQueue.status) ? 1 : 0;
     const overallPercent = done && !running ? 100 : activeQueue
         ? Math.max(2, Math.min(100, Math.round(((activeQueue.index - 1 + activeFraction) / activeQueue.total) * 100))) : 0;
+
+    // Mirror the queue outside the window: percentage in the title, progress bar
+    // on the taskbar button, amber while paused and red when something failed.
+    useEffect(() => {
+        const state = running ? (paused ? 'paused' : 'normal')
+            : done && done.failed > 0 ? 'error' : 'none';
+        SetProgressIndicator(state === 'none' ? 0 : overallPercent, state).catch(() => undefined);
+    }, [overallPercent, running, paused, done]);
 
     return (
         <main className="shell">

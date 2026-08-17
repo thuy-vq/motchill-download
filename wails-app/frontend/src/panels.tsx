@@ -76,6 +76,7 @@ export function HelpDialog({version, buildDate, logDir, platform, onClose}: {
             <li><b>Nhiều server mỗi tập</b><span>Mỗi tập giữ link của tất cả server; server 404 sẽ tự chuyển sang server khác, hết server thì lấy link mới từ trang tập.</span></li>
             <li><b>Tự tải lại</b><span>Nếu FFmpeg đứng yên 90 giây, tiến trình bị tắt và tập đó được tải lại tối đa 3 lần trước khi thử server khác.</span></li>
             <li><b>Không còn tiến trình mồ côi</b><span>FFmpeg bị hệ điều hành tắt cùng ứng dụng, kể cả khi ứng dụng bị tắt cứng.</span></li>
+            <li><b>Tiến độ ngoài cửa sổ</b><span>Phần trăm hiện trên tiêu đề và trên thanh taskbar (vàng khi tạm dừng, đỏ khi có tập lỗi); tải xong sẽ có thông báo Toast.</span></li>
             <li><b>Log tự lưu</b><span>{logDir || 'Thư mục cấu hình của ứng dụng'}</span></li>
             <li><b>Danh sách được ghi nhớ</b><span>Nếu còn tập lỗi hoặc chưa tải, ứng dụng sẽ hỏi mở lại danh sách ở lần mở kế tiếp.</span></li>
         </ul>

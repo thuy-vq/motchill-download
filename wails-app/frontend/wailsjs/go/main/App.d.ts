@@ -46,4 +46,8 @@ export function ScheduleShutdown(arg1:number):Promise<main.ShutdownStatus>;
 
 export function SelectOutputDirectory():Promise<string>;
 
+export function SetProgressIndicator(arg1:number,arg2:string):Promise<void>;
+
+export function ShowNotification(arg1:string,arg2:string):Promise<void>;
+
 export function StartDownload(arg1:main.DownloadRequest):Promise<void>;

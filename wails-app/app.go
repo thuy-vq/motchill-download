@@ -89,6 +89,38 @@ func (a *App) ClearSession() error {
 	return a.session.clear()
 }
 
+// SetProgressIndicator mirrors the queue progress outside the window: the
+// percentage goes into the window title, which the taskbar shows on hover, and
+// onto the progress bar Windows draws over the taskbar button.
+func (a *App) SetProgressIndicator(percent int, state string) {
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	title := appWindowTitle
+	if state != "none" && state != "" {
+		title = fmt.Sprintf("%d%% · %s", percent, appWindowTitle)
+		if state == "paused" {
+			title = fmt.Sprintf("%d%% (tạm dừng) · %s", percent, appWindowTitle)
+		}
+	}
+	if a.ctx != nil {
+		wailsruntime.WindowSetTitle(a.ctx, title)
+	}
+	setTaskbarProgress(percent, state)
+}
+
+// ShowNotification raises a desktop notification, used when the queue ends so
+// the result is visible while the window is in the background.
+func (a *App) ShowNotification(title, body string) error {
+	if strings.TrimSpace(title) == "" {
+		title = appWindowTitle
+	}
+	return showNotification(title, body)
+}
+
 // ScheduleShutdown powers the machine off after the queue finishes. On Windows
 // the countdown belongs to the system, so it holds even if the app is closed.
 func (a *App) ScheduleShutdown(seconds int) (ShutdownStatus, error) {

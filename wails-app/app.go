@@ -20,17 +20,26 @@ import (
 const ffmpegDownloadURL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 
 type App struct {
-	ctx           context.Context
-	settings      *settingsStore
-	autoLog       *autoLogger
-	session       *sessionStore
-	mu            sync.Mutex
-	downloading   bool
-	cancel        context.CancelFunc
-	activeFFmpeg  *os.Process
-	paused        bool
+	ctx          context.Context
+	settings     *settingsStore
+	autoLog      *autoLogger
+	session      *sessionStore
+	mu           sync.Mutex
+	downloading  bool
+	cancel       context.CancelFunc
+	activeFFmpeg *os.Process
+	// paused is the state the user asked for, not the state of one process. The
+	// queue obeys it between episodes and every process started while it is set
+	// is suspended right away, so Tạm dừng holds even mid-switch.
+	paused bool
+	// stopping is set from the moment Dừng is pressed until the queue really
+	// ends, so a process that starts in that window is killed on sight.
+	stopping      bool
 	shutdownAt    time.Time
 	shutdownTimer *time.Timer
+	// analyzeCancel stops the analysis that is running, so a long playlist can
+	// be interrupted instead of holding the window.
+	analyzeCancel context.CancelFunc
 }
 
 func NewApp() *App {
@@ -39,6 +48,15 @@ func NewApp() *App {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+}
+
+// emit publishes an event to the frontend, and does nothing before the window
+// exists, which also lets the download paths run under test.
+func (a *App) emit(name string, payload ...interface{}) {
+	if a.ctx == nil {
+		return
+	}
+	wailsruntime.EventsEmit(a.ctx, name, payload...)
 }
 
 func (a *App) shutdown(ctx context.Context) {
@@ -67,7 +85,87 @@ func (a *App) GetInitialState() InitialState {
 		LogDir:        a.autoLog.directory(),
 		LogPath:       a.autoLog.currentPath(),
 		CanShutdown:   runtime.GOOS == "windows" || runtime.GOOS == "darwin",
+		YtDlp:         a.GetYtDlpStatus(),
+		MaxHeight:     settings.MaxHeight,
+		CookieSource:  settings.CookieSource,
+		Cookies:       a.GetCookieStatus(),
+		Tuning:        a.GetYtDlpTuning(),
 	}
+}
+
+// CancelAnalyze stops the analysis in progress. A playlist of dozens of videos
+// takes a while, and the window used to offer no way out of it.
+func (a *App) CancelAnalyze() {
+	a.mu.Lock()
+	cancel := a.analyzeCancel
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// RememberMaxHeight keeps the chosen YouTube resolution cap between sessions.
+func (a *App) RememberMaxHeight(value int) error {
+	return a.settings.setMaxHeight(value)
+}
+
+// RememberCookieSource records which browser session yt-dlp should borrow, for
+// sites the user is signed into. Only cookies are used; no password is handled.
+func (a *App) RememberCookieSource(value string) error {
+	return a.settings.setCookieSource(strings.TrimSpace(value))
+}
+
+// AddCookieFile takes a cookie export — the Netscape cookies.txt that yt-dlp
+// wants, or the JSON that browser extensions produce — converts it and merges it
+// into one store, so cookies for several sites can be used together.
+func (a *App) AddCookieFile() (CookieStatus, error) {
+	selected, err := wailsruntime.OpenFileDialog(a.ctx, wailsruntime.OpenDialogOptions{
+		Title: "Chọn file cookie đã xuất (.json hoặc .txt)",
+		Filters: []wailsruntime.FileFilter{
+			{DisplayName: "Cookie đã xuất", Pattern: "*.json;*.txt"},
+			{DisplayName: "Tất cả file", Pattern: "*.*"},
+		},
+	})
+	if err != nil || selected == "" {
+		return a.GetCookieStatus(), err
+	}
+	data, err := os.ReadFile(selected)
+	if err != nil {
+		return CookieStatus{}, err
+	}
+	incoming, err := parseCookieExport(data)
+	if err != nil {
+		return CookieStatus{}, err
+	}
+	merged := mergeCookies(loadCookieStore(), incoming)
+	if err := writeCookieStore(merged); err != nil {
+		return CookieStatus{}, err
+	}
+	if err := a.settings.setCookieSource("file:" + cookieStorePath()); err != nil {
+		return CookieStatus{}, err
+	}
+	// Only counts and domains are reported; cookie values never leave the file.
+	a.emit("download:log", fmt.Sprintf("Đã nạp %d cookie cho: %s",
+		len(incoming), strings.Join(cookieDomains(incoming), ", ")))
+	return a.GetCookieStatus(), nil
+}
+
+func (a *App) GetCookieStatus() CookieStatus {
+	cookies := loadCookieStore()
+	if len(cookies) == 0 {
+		// An empty slice, never nil: nil marshals to null and the interface
+		// treats this as a list.
+		return CookieStatus{Domains: []string{}}
+	}
+	return CookieStatus{Path: cookieStorePath(), Count: len(cookies), Domains: cookieDomains(cookies)}
+}
+
+// ClearCookies removes the stored session data.
+func (a *App) ClearCookies() error {
+	if err := os.Remove(cookieStorePath()); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return a.settings.setCookieSource("")
 }
 
 // SaveSession stores the current list so an interrupted queue can be reopened.
@@ -191,6 +289,21 @@ func (a *App) AnalyzeSource(source string) (AnalysisResult, error) {
 	source = strings.TrimSpace(source)
 	if source == "" {
 		return AnalysisResult{}, fmt.Errorf("hãy nhập URL hoặc nội dung HTML")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.mu.Lock()
+	a.analyzeCancel = cancel
+	a.mu.Unlock()
+	defer func() {
+		cancel()
+		a.mu.Lock()
+		a.analyzeCancel = nil
+		a.mu.Unlock()
+	}()
+	// These sites hold no playable URL in the page: yt-dlp reports what a link
+	// holds, for a single video as well as a playlist, channel or course.
+	if prefersYtDlp(source) {
+		return a.analyzeWithYtDlp(ctx, source)
 	}
 	if info, err := os.Stat(source); err == nil && !info.IsDir() {
 		data, readErr := os.ReadFile(source)

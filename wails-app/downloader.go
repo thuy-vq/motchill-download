@@ -29,7 +29,7 @@ var (
 	// Lines emitted by "-progress": key=value with no spaces. They would
 	// otherwise flood the tail kept for error messages.
 	ffmpegProgressKey = regexp.MustCompile(`^[A-Za-z0-9_]+=\S*$`)
-	invalidFileChars      = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]`)
+	invalidFileChars  = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]`)
 )
 
 const (
@@ -38,6 +38,8 @@ const (
 	stallTimeout = 90 * time.Second
 	// stallAttempts is the total number of tries per episode, retries included.
 	stallAttempts = 3
+	// throttleGiveUp is how many consecutive blocked episodes end the queue.
+	throttleGiveUp = 3
 )
 
 // errStalled marks a download that was killed because it stopped progressing.
@@ -88,59 +90,134 @@ func (a *App) StartDownload(request DownloadRequest) error {
 	return nil
 }
 
+// CancelDownload stops the queue for good. Nothing here can fail in a way that
+// leaves FFmpeg running: the flag is raised first, the process tree is killed
+// outright, and stopWatchdog keeps killing until the queue reports it is done.
 func (a *App) CancelDownload() {
 	a.mu.Lock()
+	if !a.downloading {
+		a.mu.Unlock()
+		return
+	}
 	cancel := a.cancel
 	process := a.activeFFmpeg
 	wasPaused := a.paused
 	a.paused = false
+	a.stopping = true
 	a.mu.Unlock()
+	// A suspended process never drains its pipes, so the queue would sit in the
+	// output loop forever; it is resumed before the kill.
 	if wasPaused && process != nil {
 		_ = setProcessPaused(process, false)
 	}
 	if cancel != nil {
 		cancel()
 	}
+	if process != nil {
+		_ = killProcessTree(process)
+	}
+	go a.stopWatchdog()
 }
 
+// stopWatchdog kills whatever FFmpeg is running until the queue actually ends.
+// A single kill can miss the mark: the process may have been mid-start when Dừng
+// was pressed, or a retry may have started a new one a moment later.
+func (a *App) stopWatchdog() {
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		time.Sleep(300 * time.Millisecond)
+		a.mu.Lock()
+		running := a.downloading
+		process := a.activeFFmpeg
+		a.mu.Unlock()
+		if !running {
+			return
+		}
+		if process != nil {
+			_ = setProcessPaused(process, false)
+			_ = killProcessTree(process)
+		}
+		if time.Now().After(deadline) {
+			a.emit("download:log", "Hàng đợi chưa dừng hẳn sau 30 giây; hãy đóng ứng dụng nếu tình trạng này kéo dài.")
+			return
+		}
+	}
+}
+
+// PauseDownload flips the pause the user asked for. The flag is what the queue
+// obeys, so the answer never depends on catching a process at the right moment:
+// if the episode just ended, the next one starts suspended instead.
 func (a *App) PauseDownload() (DownloadControlStatus, error) {
 	a.mu.Lock()
 	if !a.downloading {
 		a.mu.Unlock()
 		return DownloadControlStatus{}, fmt.Errorf("không có hàng đợi đang tải")
 	}
-	process := a.activeFFmpeg
+	if a.stopping {
+		a.mu.Unlock()
+		return DownloadControlStatus{}, fmt.Errorf("hàng đợi đang dừng")
+	}
 	targetPaused := !a.paused
+	a.paused = targetPaused
+	process := a.activeFFmpeg
 	a.mu.Unlock()
+	a.applyPause(process, targetPaused)
+	return DownloadControlStatus{Paused: targetPaused}, nil
+}
+
+// applyPause brings one process in line with the requested state, treating a
+// process that has already ended as nothing to do.
+func (a *App) applyPause(process *os.Process, paused bool) {
 	if process == nil {
-		return DownloadControlStatus{}, fmt.Errorf("đang chuyển tập, hãy thử lại sau một lát")
+		return
 	}
-	if err := setProcessPaused(process, targetPaused); err != nil {
-		return DownloadControlStatus{}, err
+	err := setProcessPaused(process, paused)
+	if err == nil || errors.Is(err, errProcessGone) {
+		return
 	}
-	a.mu.Lock()
-	if a.activeFFmpeg == process {
-		a.paused = targetPaused
-	}
-	paused := a.paused
-	a.mu.Unlock()
-	return DownloadControlStatus{Paused: paused}, nil
+	a.emit("download:log", err.Error())
 }
 
 func (a *App) setActiveFFmpeg(process *os.Process) {
 	a.mu.Lock()
 	a.activeFFmpeg = process
-	a.paused = false
+	paused := a.paused
+	stopping := a.stopping
 	a.mu.Unlock()
+	if stopping {
+		// Dừng was pressed while this process was starting up.
+		_ = killProcessTree(process)
+		return
+	}
+	if paused {
+		a.applyPause(process, true)
+	}
 }
 
 func (a *App) clearActiveFFmpeg(process *os.Process) {
 	a.mu.Lock()
 	if a.activeFFmpeg == process {
 		a.activeFFmpeg = nil
-		a.paused = false
 	}
 	a.mu.Unlock()
+}
+
+// waitWhilePaused holds the queue between episodes for as long as the user keeps
+// it paused, and reports false when the queue was stopped instead of resumed.
+func (a *App) waitWhilePaused(ctx context.Context) bool {
+	for {
+		if ctx.Err() != nil {
+			return false
+		}
+		if !a.isPaused() {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 func (a *App) runQueue(ctx context.Context, ffmpeg string, request DownloadRequest) {
@@ -150,11 +227,14 @@ func (a *App) runQueue(ctx context.Context, ffmpeg string, request DownloadReque
 		a.cancel = nil
 		a.activeFFmpeg = nil
 		a.paused = false
+		a.stopping = false
 		a.mu.Unlock()
 	}()
 
 	total := len(request.Items)
 	completed, failed, skipped := 0, 0, 0
+	throttled := 0
+	nextYtDlpStart := time.Time{}
 	usedStreams := map[string]string{}
 	fingerprints := map[string]string{}
 	width := len(fmt.Sprintf("%d", maxEpisodeNumber(request.Items)))
@@ -163,6 +243,11 @@ func (a *App) runQueue(ctx context.Context, ffmpeg string, request DownloadReque
 	}
 	for index, item := range request.Items {
 		if ctx.Err() != nil {
+			break
+		}
+		// Pausing between episodes holds the queue here instead of letting the
+		// next FFmpeg start behind the user's back.
+		if !a.waitWhilePaused(ctx) {
 			break
 		}
 		name := item.Name
@@ -178,7 +263,18 @@ func (a *App) runQueue(ctx context.Context, ffmpeg string, request DownloadReque
 			baseTitle = "Video"
 		}
 		outputName := baseTitle
-		if total > 1 || item.Number > 0 {
+		switch {
+		case item.Engine == engineYtDlp || prefersYtDlp(item.PageURL):
+			// Video and lecture titles carry the meaning, so they name the file
+			// instead of an episode number.
+			outputName = sanitizeFileName(name)
+			if item.Number > 0 && total > 1 {
+				outputName = fmt.Sprintf("%0*d - %s", width, item.Number, sanitizeFileName(name))
+			}
+			if outputName == "" {
+				outputName = baseTitle
+			}
+		case total > 1 || item.Number > 0:
 			if item.Number > 0 {
 				outputName += fmt.Sprintf(" - Tập %0*d", width, item.Number)
 			} else {
@@ -199,6 +295,108 @@ func (a *App) runQueue(ctx context.Context, ffmpeg string, request DownloadReque
 				wailsruntime.EventsEmit(a.ctx, "download:queue", event)
 				continue
 			}
+		}
+
+		// yt-dlp handles YouTube and the other sites it knows: it picks the
+		// formats, merges them with our FFmpeg and keeps up with site changes.
+		if item.Engine == engineYtDlp || prefersYtDlp(item.PageURL) {
+			isYouTubeItem := isYouTubeURL(item.PageURL)
+			if delay := time.Until(nextYtDlpStart); isYouTubeItem && delay > time.Second {
+				event.Message = fmt.Sprintf("Giãn yêu cầu YouTube thêm %s", delay.Round(time.Second))
+				wailsruntime.EventsEmit(a.ctx, "download:queue", event)
+				wailsruntime.EventsEmit(a.ctx, "download:log", fmt.Sprintf(
+					"%s — chờ %s trước yêu cầu kế tiếp để tránh rate limit.", displayName, delay.Round(time.Second)))
+				if !waitForDownloadDelay(ctx, delay) {
+					break
+				}
+			}
+			event.Status = "downloading"
+			event.Attempt = 1
+			event.Message = ""
+			wailsruntime.EventsEmit(a.ctx, "download:queue", event)
+			var youTubeErr error
+			stallAttempt, rateLimitRetry, totalAttempt := 1, 0, 1
+			for {
+				if stallAttempt > 1 {
+					event.Attempt = totalAttempt
+					event.Message = fmt.Sprintf("Tải lại lần %d sau khi treo", stallAttempt)
+					wailsruntime.EventsEmit(a.ctx, "download:queue", event)
+					wailsruntime.EventsEmit(a.ctx, "download:log",
+						fmt.Sprintf("%s — tải lại lần %d/%d sau khi yt-dlp bị treo.", displayName, stallAttempt, stallAttempts))
+				}
+				if delay := time.Until(nextYtDlpStart); isYouTubeItem && delay > 0 {
+					if !waitForDownloadDelay(ctx, delay) {
+						break
+					}
+				}
+				if isYouTubeItem {
+					nextYtDlpStart = time.Now().Add(ytDlpQueueInterval)
+				}
+				youTubeErr = a.downloadWithYtDlp(ctx, ffmpeg, item, outputPath, index+1, total, request.MaxHeight, displayName)
+				if youTubeErr == nil || ctx.Err() != nil {
+					break
+				}
+				if errors.Is(youTubeErr, errStalled) && stallAttempt < stallAttempts {
+					stallAttempt++
+					totalAttempt++
+					continue
+				}
+				if isYouTubeItem && isAccountRateLimitFailure(youTubeErr) && rateLimitRetry < ytDlpRateLimitRetries {
+					rateLimitRetry++
+					totalAttempt++
+					event.Attempt = totalAttempt
+					event.Message = accountRateLimitHint()
+					wailsruntime.EventsEmit(a.ctx, "download:queue", event)
+					retryAt := time.Now().Add(ytDlpRateLimitCooldown)
+					wailsruntime.EventsEmit(a.ctx, "download:log", fmt.Sprintf(
+						"%s — YouTube giới hạn tài khoản; giữ nguyên tập này và tự thử lại lúc %s (có thể bấm Dừng).",
+						displayName, retryAt.Format("15:04")))
+					if !waitForDownloadDelay(ctx, ytDlpRateLimitCooldown) || !a.waitWhilePaused(ctx) {
+						break
+					}
+					// A rate-limit retry is independent of stall retries.
+					stallAttempt = 1
+					continue
+				}
+				break
+			}
+			event.Message = ""
+			if ctx.Err() != nil {
+				break
+			}
+			if youTubeErr != nil {
+				failed++
+				event.Status = "failed"
+				event.Failed = failed
+				event.Message = youTubeErr.Error()
+				if isYouTubeItem && isAccountRateLimitFailure(youTubeErr) {
+					throttled = throttleGiveUp
+					event.Message = accountRateLimitHint() + " — " + youTubeErr.Error()
+				} else if isThrottleFailure(youTubeErr) {
+					throttled++
+					hint := throttleHint(request.CookieSource)
+					event.Message = hint + " — " + youTubeErr.Error()
+				} else {
+					throttled = 0
+				}
+			} else {
+				throttled = 0
+				completed++
+				event.Status = "completed"
+				event.Completed = completed
+			}
+			wailsruntime.EventsEmit(a.ctx, "download:queue", event)
+			// Continuing to hammer a site that is already refusing only makes the
+			// block worse, so the queue stops and keeps the rest for later.
+			if throttled >= throttleGiveUp {
+				message := fmt.Sprintf("Dừng hàng đợi: %d tập liên tiếp bị chặn. %s", throttled, throttleHint(request.CookieSource))
+				if isYouTubeItem && isAccountRateLimitFailure(youTubeErr) {
+					message = "Dừng hàng đợi: tài khoản YouTube vẫn bị rate limit sau thời gian nghỉ; các tập còn lại được giữ nguyên để tải sau."
+				}
+				wailsruntime.EventsEmit(a.ctx, "download:log", message)
+				break
+			}
+			continue
 		}
 
 		streams, err := a.resolveStreams(item, request.PreferredServer)

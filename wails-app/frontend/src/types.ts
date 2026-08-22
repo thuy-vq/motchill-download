@@ -31,6 +31,17 @@ export function episodeKey(movieKey: string, episodeID: string) {
     return `${movieKey}::${episodeID}`;
 }
 
+const youTubeHosts = /^(?:www\.|m\.|music\.)?(?:youtube\.com|youtube-nocookie\.com|youtu\.be)$/i;
+
+/** Mirrors the host check in the backend, used to spot YouTube items in the list. */
+export function isYouTube(value: string) {
+    try {
+        return youTubeHosts.test(new URL(value).host);
+    } catch {
+        return false;
+    }
+}
+
 export function errorMessage(error: unknown) {
     if (typeof error === 'string') return error;
     if (error instanceof Error) return error.message;

@@ -47,6 +47,8 @@ export function RestoreDialog({summary, onRestore, onDiscard}: {
 }
 
 const supportedSources = [
+    ['Site cần đăng nhập', 'Udemy, Vimeo, Coursera… dùng yt-dlp kèm cookie của trình duyệt bạn đang đăng nhập: chọn tên trình duyệt, hoặc nạp file cookie do extension xuất ra (.json) hay cookies.txt — ứng dụng tự chuyển định dạng và gộp được nhiều site. Không bao giờ nhận mật khẩu. Nội dung có DRM, hoặc site chặn API với client ngoài trình duyệt, thì không tải được.'],
+    ['YouTube — video &amp; playlist', 'Dán link watch, youtu.be hoặc playlist; cả playlist thành một nhóm với từng video là một tập. Dùng yt-dlp, tự cập nhật logic bóc tách khi YouTube thay đổi (một lần/ngày và có nút Cập nhật). Chọn được mức chất lượng tối đa.'],
     ['Motchill và các biến thể', 'motchill.credit, motphimchill.cc, motphimchilll.me, phimmoichill.hair… — cùng một mã nguồn nên chỉ khác dạng link. Hỗ trợ cả /phim/… và /xem-phim/…, tập dạng tap-1, tap-1-sv-0, tap-1-3097673 hay tap-full/vietsub.'],
     ['Danh sách tập tự động', 'Đọc `episodeVariants` và API `/baseapi/episodes` để lấy trọn bộ tập từ một link duy nhất, dùng đúng slug của host nên link từng tập không bị đoán sai.'],
     ['HLS — .m3u8', 'Định dạng phổ biến nhất của các host phim; FFmpeg ghép segment thành một file MP4.'],
@@ -62,7 +64,7 @@ export function HelpDialog({version, buildDate, logDir, platform, onClose}: {
                    onClose={onClose} actions={<button className="primary" onClick={onClose}>Đã hiểu</button>}>
         <ol className="help-steps">
             <li><b>Dán link</b> — mỗi dòng một URL trang phim hoặc trang tập, rồi bấm <b>Phân tích & thêm</b> (Ctrl + Enter). Phim mới được thêm vào danh sách đang có.</li>
-            <li><b>Chọn tập</b> — tick từng tập, từng phim, hoặc <b>Chọn tất cả</b>. Bấm mũi tên đầu dòng để thu gọn từng nhóm phim.</li>
+            <li><b>Chọn tập</b> — tick từng tập, từng phim, hoặc <b>Chọn tất cả</b>. Bấm tên phim để mở trang gốc; bấm mũi tên đầu dòng để thu gọn từng nhóm phim.</li>
             <li><b>Chọn thư mục lưu</b> — nút 📁 ở dòng phim áp cho cả phim, nút 📁 ở dòng tập chỉ áp cho tập đó và được ưu tiên.</li>
             <li><b>Tải</b> — lần đầu cần cài hoặc chọn FFmpeg. Hàng đợi chạy tuần tự, mỗi tập có thanh tiến độ riêng; có thể Tạm dừng, Dừng, hoặc bật <b>Tắt máy khi tải xong</b>.</li>
             <li><b>Xem kết quả</b> — thẻ <b>Kết quả</b> liệt kê tập nào xong, lỗi (kèm lý do) hay chưa tải, và cho chọn lại đúng các tập lỗi để tải lại.</li>
@@ -73,6 +75,7 @@ export function HelpDialog({version, buildDate, logDir, platform, onClose}: {
         </ul>
         <h4>Chống treo &amp; nhật ký</h4>
         <ul className="help-list">
+            <li><b>YouTube giới hạn tải</b><span>Lỗi bot/403 sẽ dừng sau 3 tập liên tiếp. Nếu YouTube báo tài khoản bị rate limit theo giờ, ứng dụng giữ nguyên tập hiện tại, nghỉ 1 giờ rồi thử lại đúng tập đó; nếu vẫn bị giới hạn thì dừng hàng đợi để không làm lỗi hàng loạt tập sau.</span></li>
             <li><b>Nhiều server mỗi tập</b><span>Mỗi tập giữ link của tất cả server; server 404 sẽ tự chuyển sang server khác, hết server thì lấy link mới từ trang tập.</span></li>
             <li><b>Tự tải lại</b><span>Nếu FFmpeg đứng yên 90 giây, tiến trình bị tắt và tập đó được tải lại tối đa 3 lần trước khi thử server khác.</span></li>
             <li><b>Không còn tiến trình mồ côi</b><span>FFmpeg bị hệ điều hành tắt cùng ứng dụng, kể cả khi ứng dụng bị tắt cứng.</span></li>

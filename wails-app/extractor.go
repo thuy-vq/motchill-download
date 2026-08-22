@@ -31,11 +31,11 @@ var (
 		"vietsub": true, "thuyet-minh": true, "thuyet-minh-vietsub": true, "long-tieng": true,
 		"sub": true, "tm": true, "lt": true, "full-hd": true, "hd": true,
 	}
-	titlePattern       = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
-	canonicalPattern   = regexp.MustCompile(`(?i)<link[^>]+rel\s*=\s*["']canonical["'][^>]+href\s*=\s*["'](https?://[^"']+)`)
-	ogURLPattern       = regexp.MustCompile(`(?i)<meta[^>]+property\s*=\s*["']og:url["'][^>]+content\s*=\s*["'](https?://[^"']+)`)
-	hrefPattern        = regexp.MustCompile(`(?i)href\s*=\s*["']([^"']+)["']`)
-	movieIDPattern     = regexp.MustCompile(`(?i)["'](?:movieId|movie_id)["']\s*:\s*["']?(\d+)`)
+	titlePattern     = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
+	canonicalPattern = regexp.MustCompile(`(?i)<link[^>]+rel\s*=\s*["']canonical["'][^>]+href\s*=\s*["'](https?://[^"']+)`)
+	ogURLPattern     = regexp.MustCompile(`(?i)<meta[^>]+property\s*=\s*["']og:url["'][^>]+content\s*=\s*["'](https?://[^"']+)`)
+	hrefPattern      = regexp.MustCompile(`(?i)href\s*=\s*["']([^"']+)["']`)
+	movieIDPattern   = regexp.MustCompile(`(?i)["'](?:movieId|movie_id)["']\s*:\s*["']?(\d+)`)
 	// Trailing site name on the page title, e.g. "… - Motchill",
 	// "… | Motphimchill", "… - PhimmoiChill".
 	titleSitePattern = regexp.MustCompile(`(?i)\s*[-|–]\s*[\p{L}\d .]*chill[\p{L}\d .]*$`)

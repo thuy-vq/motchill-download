@@ -10,6 +10,18 @@ import (
 type appSettings struct {
 	LastOutputDir string `json:"lastOutputDir"`
 	FFmpegPath    string `json:"ffmpegPath"`
+	YtDlpPath     string `json:"ytDlpPath"`
+	// YtDlpCheckedAt records the last self-update check, so it runs once a day.
+	YtDlpCheckedAt string `json:"ytDlpCheckedAt"`
+	MaxHeight      int    `json:"maxHeight"`
+	// CookieSource is a browser name for --cookies-from-browser, or "file:<path>"
+	// for a cookies.txt export. Needed by sites the user is logged into.
+	CookieSource string `json:"cookieSource"`
+	// Advanced yt-dlp switches for the YouTube PO token provider.
+	PluginDir       string `json:"pluginDir"`
+	POTokenProvider string `json:"poTokenProvider"`
+	POToken         string `json:"poToken"`
+	PlayerClient    string `json:"playerClient"`
 }
 
 type settingsStore struct {
@@ -63,6 +75,44 @@ func (s *settingsStore) setOutputDir(value string) error {
 func (s *settingsStore) setFFmpegPath(value string) error {
 	s.mu.Lock()
 	s.data.FFmpegPath = value
+	s.mu.Unlock()
+	return s.save()
+}
+
+func (s *settingsStore) setYtDlpPath(value string) error {
+	s.mu.Lock()
+	s.data.YtDlpPath = value
+	s.mu.Unlock()
+	return s.save()
+}
+
+func (s *settingsStore) setYtDlpCheckedAt(value string) error {
+	s.mu.Lock()
+	s.data.YtDlpCheckedAt = value
+	s.mu.Unlock()
+	return s.save()
+}
+
+func (s *settingsStore) setCookieSource(value string) error {
+	s.mu.Lock()
+	s.data.CookieSource = value
+	s.mu.Unlock()
+	return s.save()
+}
+
+func (s *settingsStore) setYtDlpTuning(pluginDir, provider, token, playerClient string) error {
+	s.mu.Lock()
+	s.data.PluginDir = pluginDir
+	s.data.POTokenProvider = provider
+	s.data.POToken = token
+	s.data.PlayerClient = playerClient
+	s.mu.Unlock()
+	return s.save()
+}
+
+func (s *settingsStore) setMaxHeight(value int) error {
+	s.mu.Lock()
+	s.data.MaxHeight = value
 	s.mu.Unlock()
 	return s.save()
 }

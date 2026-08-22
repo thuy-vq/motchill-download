@@ -2,7 +2,7 @@
 setlocal
 cd /d "%~dp0"
 
-node "scripts\bump-version.mjs"
+if not "%BUMP_VERSION%"=="0" node "scripts\bump-version.mjs"
 if errorlevel 1 exit /b 1
 set /p APP_VERSION=<VERSION
 echo Building version %APP_VERSION%...

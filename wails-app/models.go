@@ -15,7 +15,9 @@ type Episode struct {
 	// offers for this episode so a dead link can fall back to another.
 	StreamURL string        `json:"streamUrl,omitempty"`
 	Streams   []MediaStream `json:"streams,omitempty"`
-	Current   bool          `json:"current"`
+	// Engine is "ytdlp" for links that yt-dlp downloads; empty means FFmpeg.
+	Engine  string `json:"engine,omitempty"`
+	Current bool   `json:"current"`
 }
 
 type AnalysisResult struct {
@@ -28,15 +30,21 @@ type AnalysisResult struct {
 }
 
 type InitialState struct {
-	LastOutputDir string `json:"lastOutputDir"`
-	FFmpegReady   bool   `json:"ffmpegReady"`
-	FFmpegPath    string `json:"ffmpegPath"`
-	Platform      string `json:"platform"`
-	Version       string `json:"version"`
-	BuildDate     string `json:"buildDate"`
-	LogDir        string `json:"logDir"`
-	LogPath       string `json:"logPath"`
-	CanShutdown   bool   `json:"canShutdown"`
+	LastOutputDir string     `json:"lastOutputDir"`
+	FFmpegReady   bool       `json:"ffmpegReady"`
+	FFmpegPath    string     `json:"ffmpegPath"`
+	Platform      string     `json:"platform"`
+	Version       string     `json:"version"`
+	BuildDate     string     `json:"buildDate"`
+	LogDir        string     `json:"logDir"`
+	LogPath       string     `json:"logPath"`
+	CanShutdown   bool       `json:"canShutdown"`
+	YtDlp         ToolStatus `json:"ytDlp"`
+	MaxHeight     int        `json:"maxHeight"`
+	CookieSource  string     `json:"cookieSource"`
+	// Cookies reports counts and domains only; values stay in the file.
+	Cookies CookieStatus `json:"cookies"`
+	Tuning  YtDlpTuning  `json:"tuning"`
 }
 
 // SessionEpisode is one row of the saved list, including where it should be
@@ -48,6 +56,7 @@ type SessionEpisode struct {
 	PageURL   string        `json:"pageUrl"`
 	StreamURL string        `json:"streamUrl,omitempty"`
 	Streams   []MediaStream `json:"streams,omitempty"`
+	Engine    string        `json:"engine,omitempty"`
 	OutputDir string        `json:"outputDir,omitempty"`
 	Selected  bool          `json:"selected"`
 	Status    string        `json:"status,omitempty"`
@@ -107,6 +116,15 @@ type FFmpegStatus struct {
 	Path  string `json:"path"`
 }
 
+// ToolStatus describes an external binary the app manages, such as yt-dlp.
+type ToolStatus struct {
+	Ready   bool   `json:"ready"`
+	Path    string `json:"path"`
+	Version string `json:"version"`
+	// CheckedAt is when the self-update last ran, in RFC3339.
+	CheckedAt string `json:"checkedAt"`
+}
+
 type SourceDocument struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`
@@ -119,6 +137,7 @@ type DownloadItem struct {
 	PageURL   string        `json:"pageUrl"`
 	StreamURL string        `json:"streamUrl,omitempty"`
 	Streams   []MediaStream `json:"streams,omitempty"`
+	Engine    string        `json:"engine,omitempty"`
 	Title     string        `json:"title,omitempty"`
 	OutputDir string        `json:"outputDir,omitempty"`
 }
@@ -129,6 +148,10 @@ type DownloadRequest struct {
 	PreferredServer string         `json:"preferredServer"`
 	Items           []DownloadItem `json:"items"`
 	SkipExisting    bool           `json:"skipExisting"`
+	// MaxHeight caps the resolution taken from YouTube; 0 means no cap.
+	MaxHeight int `json:"maxHeight"`
+	// CookieSource is only carried here to word the throttling hint correctly.
+	CookieSource string `json:"cookieSource,omitempty"`
 }
 
 type QueueEvent struct {
@@ -147,13 +170,13 @@ type QueueEvent struct {
 }
 
 type ProgressEvent struct {
-	ID       string  `json:"id"`
-	Index    int     `json:"index"`
-	Total    int     `json:"total"`
-	Name     string  `json:"name"`
-	Time     string  `json:"time"`
-	Duration string  `json:"duration,omitempty"`
-	Speed    string  `json:"speed"`
+	ID       string `json:"id"`
+	Index    int    `json:"index"`
+	Total    int    `json:"total"`
+	Name     string `json:"name"`
+	Time     string `json:"time"`
+	Duration string `json:"duration,omitempty"`
+	Speed    string `json:"speed"`
 	// Percent is -1 while the total duration is unknown.
 	Percent float64 `json:"percent"`
 }

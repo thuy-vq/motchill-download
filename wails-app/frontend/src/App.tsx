@@ -1,21 +1,47 @@
 import {useEffect, useMemo, useRef, useState} from 'react';
 import './App.css';
 import {
-    AnalyzeHTML, AnalyzeSource, AppendLog, CancelDownload, CancelShutdown, ChooseFFmpeg, ClearSession,
-    GetInitialState, GetSavedSession, InstallFFmpeg, NewLogSession, PauseDownload, OpenHTMLFile, RevealFile,
-    SaveLog, SaveSession, ScheduleShutdown, SelectOutputDirectory, SetProgressIndicator, ShowNotification,
-    StartDownload,
+    AnalyzeHTML, AnalyzeSource, AppendLog, CancelAnalyze, CancelDownload, CancelShutdown, ChooseFFmpeg, ClearSession,
+    EnsureYtDlpFresh, GetInitialState, GetSavedSession, InstallFFmpeg, InstallYtDlp, NewLogSession, PauseDownload,
+    OpenHTMLFile, RememberMaxHeight, RevealFile, SaveLog, SaveSession, ScheduleShutdown, SelectOutputDirectory,
+    AddCookieFile, CheckYtDlpPlugins, ClearCookies, GetProviderStatus, InstallPOTokenProvider, RememberCookieSource,
+    RefreshYouTubeSession, RememberYtDlpTuning, SelectPluginDir, StartPOTokenProvider, StopPOTokenProvider,
+    SetProgressIndicator, ShowNotification, StartDownload, UpdateYtDlp,
 } from '../wailsjs/go/main/App';
-import {EventsOff, EventsOn} from '../wailsjs/runtime/runtime';
+import {BrowserOpenURL, EventsOff, EventsOn} from '../wailsjs/runtime/runtime';
 import {HelpDialog, ResultsPanel, RestoreDialog, ShutdownBanner} from './panels';
 import {
-    episodeKey, errorMessage, folderName, statusLabels,
+    episodeKey, errorMessage, folderName, isYouTube, statusLabels,
     type Analysis, type DoneEvent, type MovieEntry, type ProgressEvent, type QueueEvent,
     type SessionSummary, type Stream,
 } from './types';
 
 // Seconds between the queue finishing and the machine powering off.
 const shutdownDelaySeconds = 60;
+
+type CookieStatus = {path: string; count: number; domains: string[]};
+// Advanced yt-dlp switches, all optional: they only matter when YouTube refuses
+// media URLs and a PO token provider has to fill the gap.
+type Tuning = {pluginDir: string; providerUrl: string; token: string; playerClient: string};
+
+// A Go nil slice arrives as null, so every field is defaulted before the
+// interface touches it — a missing list used to crash the whole window.
+function normalizeCookieStatus(value: any): CookieStatus {
+    return {
+        path: value?.path ?? '',
+        count: value?.count ?? 0,
+        domains: Array.isArray(value?.domains) ? value.domains : [],
+    };
+}
+
+function normalizeTuning(value: any): Tuning {
+    return {
+        pluginDir: value?.pluginDir ?? "",
+        providerUrl: value?.providerUrl ?? "",
+        token: value?.token ?? "",
+        playerClient: value?.playerClient ?? "",
+    };
+}
 
 function App() {
     const [source, setSource] = useState('');
@@ -31,11 +57,27 @@ function App() {
     const [appVersion, setAppVersion] = useState('');
     const [ffmpegInstalling, setFfmpegInstalling] = useState(false);
     const [ffmpegProgress, setFfmpegProgress] = useState(0);
+    const [ytDlp, setYtDlp] = useState<{ready: boolean; path: string; version: string; checkedAt: string}>(
+        {ready: false, path: '', version: '', checkedAt: ''});
+    const [ytDlpBusy, setYtDlpBusy] = useState('');
+    const [ytDlpProgress, setYtDlpProgress] = useState(0);
+    const [maxHeight, setMaxHeight] = useState(1080);
+    const [cookieSource, setCookieSource] = useState('');
+    const [cookieStatus, setCookieStatus] = useState<CookieStatus>({path: '', count: 0, domains: []});
+    const [tuning, setTuning] = useState<Tuning>({pluginDir: '', providerUrl: '', token: '', playerClient: ''});
+    const [tuningOpen, setTuningOpen] = useState(false);
+    const [pluginCheck, setPluginCheck] = useState<any>(null);
+    const [checkingPlugins, setCheckingPlugins] = useState(false);
+    const [provider, setProvider] = useState<any>(null);
+    const [providerBusy, setProviderBusy] = useState("");
     const [analyzing, setAnalyzing] = useState(false);
     const [analyzeProgress, setAnalyzeProgress] = useState('');
     const [running, setRunning] = useState(false);
     const [paused, setPaused] = useState(false);
     const [pauseBusy, setPauseBusy] = useState(false);
+    // stopping keeps the controls honest between pressing Dừng and the queue
+    // actually ending, which takes a moment while FFmpeg is torn down.
+    const [stopping, setStopping] = useState(false);
     const [notice, setNotice] = useState('Có thể nhập nhiều URL, mỗi URL một dòng.');
     const [error, setError] = useState('');
     const [queue, setQueue] = useState<Record<string, QueueEvent>>({});
@@ -67,6 +109,8 @@ function App() {
     // does not hit the disk once per keystroke.
     const sessionTimer = useRef<number | null>(null);
     const restoring = useRef(false);
+    // Set when the user stops the analysis, so the remaining links are skipped.
+    const analyzeStopped = useRef(false);
 
     const allEpisodeKeys = useMemo(() => movies.flatMap(movie =>
         movie.analysis.episodes.map(episode => episodeKey(movie.key, episode.id))), [movies]);
@@ -245,8 +289,19 @@ function App() {
             setLogDir(state.logDir || '');
             setBuildDate(state.buildDate || '');
             setCanShutdown(Boolean(state.canShutdown));
+            if (state.ytDlp) setYtDlp(state.ytDlp);
+            if (state.maxHeight > 0) setMaxHeight(state.maxHeight);
+            setCookieSource(state.cookieSource || '');
+            setCookieStatus(normalizeCookieStatus(state.cookies));
+            if (state.tuning) setTuning(normalizeTuning(state.tuning));
+            if (state.tuning) setTuning({
+                pluginDir: state.tuning.pluginDir ?? '', providerUrl: state.tuning.providerUrl ?? '',
+                token: state.tuning.token ?? '', playerClient: state.tuning.playerClient ?? '',
+            });
             if (state.logPath) setAutoLogPath(state.logPath);
         }).catch((reason: unknown) => setError(errorMessage(reason)));
+
+        GetProviderStatus().then(setProvider).catch(() => undefined);
 
         // Only ask about the previous list when it still has work left in it.
         GetSavedSession().then((saved: any) => {
@@ -269,7 +324,7 @@ function App() {
         EventsOn('download:progress', (event: ProgressEvent) => setProgress(event));
         EventsOn('download:log', (line: string) => appendLog(line));
         EventsOn('download:done', (event: DoneEvent) => {
-            setDone(event); setRunning(false); setPaused(false); setProgress(null);
+            setDone(event); setRunning(false); setPaused(false); setStopping(false); setProgress(null);
             appendLog(event.cancelled
                 ? `Đã hủy hàng đợi: ${event.completed}/${event.total} tập hoàn tất.`
                 : `Kết thúc: ${event.completed} thành công, ${event.failed} lỗi, ${event.skipped} bỏ qua.`);
@@ -287,8 +342,12 @@ function App() {
         EventsOn('ffmpeg:progress', (event: {downloaded: number; total: number}) => {
             if (event.total > 0) setFfmpegProgress(Math.min(100, Math.round(event.downloaded * 100 / event.total)));
         });
+        EventsOn('ytdlp:progress', (event: {downloaded: number; total: number}) => {
+            if (event.total > 0) setYtDlpProgress(Math.min(100, Math.round(event.downloaded * 100 / event.total)));
+        });
         return () => {
-            ['download:queue', 'download:progress', 'download:log', 'download:done', 'ffmpeg:progress'].forEach(name => EventsOff(name));
+            ['download:queue', 'download:progress', 'download:log', 'download:done', 'ffmpeg:progress',
+                'ytdlp:progress'].forEach(name => EventsOff(name));
         };
     }, []);
 
@@ -323,13 +382,19 @@ function App() {
     }
 
     async function analyze() {
-        const links = (source.match(/https?:\/\/[^\s]+/g) ?? [])
-            .map(link => link.replace(/[),;\]]+$/, ''));
+        const links = [...source.matchAll(/https?:\/\/[^\s<>"']+/g)]
+            .map(match => match[0].replace(/[),;\].!?]+$/, ''))
+            .filter((link, index, values) => link && values.indexOf(link) === index);
         if (!links.length) { setError('Hãy nhập ít nhất một URL. Mỗi URL nên nằm trên một dòng.'); return; }
         setAnalyzing(true); setError('');
+        // Một lượt phân tích là một phiên YouTube mới: cookie và PO token cũ bị
+        // bỏ, lượt sau mở phiên khác thay vì dùng lại một danh tính cả buổi.
+        RefreshYouTubeSession().catch(() => undefined);
+        analyzeStopped.current = false;
         let added = 0;
         const failures: string[] = [];
         for (let index = 0; index < links.length; index++) {
+            if (analyzeStopped.current) break;
             const link = links[index];
             setAnalyzeProgress(`${index + 1}/${links.length}`);
             setNotice(`Đang phân tích ${index + 1}/${links.length}: ${link}`);
@@ -337,6 +402,7 @@ function App() {
                 addAnalysis(await AnalyzeSource(link) as Analysis, link);
                 added++;
             } catch (reason) {
+                if (analyzeStopped.current) break;
                 failures.push(`${link}\n${errorMessage(reason)}`);
                 // Analysis failures used to live only in the error box, which
                 // left nothing in the log to look at afterwards.
@@ -344,9 +410,21 @@ function App() {
             }
         }
         setAnalyzing(false); setAnalyzeProgress('');
+        if (analyzeStopped.current) {
+            setSource('');
+            setNotice(added ? `Đã dừng. Thêm được ${added} phim trước khi dừng.` : 'Đã dừng phân tích.');
+            appendLog('Đã dừng phân tích theo yêu cầu.');
+            return;
+        }
         setSource(failures.length ? failures.map(value => value.split('\n')[0]).join('\n') : '');
         setNotice(`Đã thêm ${added}/${links.length} phim vào danh sách.`);
         if (failures.length) setError(`Không phân tích được ${failures.length} link:\n${failures.join('\n\n')}`);
+    }
+
+    function stopAnalyze() {
+        analyzeStopped.current = true;
+        CancelAnalyze().catch(() => undefined);
+        setNotice("Đang dừng phân tích…");
     }
 
     async function openHTML() {
@@ -411,6 +489,119 @@ function App() {
         });
     }
 
+    // yt-dlp holds the YouTube logic, so it is installed and updated separately.
+    async function installYtDlp() {
+        setYtDlpBusy('install'); setYtDlpProgress(0); setError('');
+        setNotice('Đang tải yt-dlp từ GitHub...');
+        try {
+            const status: any = await InstallYtDlp();
+            setYtDlp(status);
+            setNotice(`yt-dlp ${status.version || ''} đã sẵn sàng.`);
+            appendLog(`Đã cài yt-dlp ${status.version || ''} tại ${status.path}.`);
+        } catch (reason) { setError(errorMessage(reason)); }
+        finally { setYtDlpBusy(''); }
+    }
+
+    async function updateYtDlp() {
+        setYtDlpBusy('update'); setError('');
+        setNotice('Đang cập nhật yt-dlp...');
+        try {
+            const status: any = await UpdateYtDlp();
+            setYtDlp(status);
+            setNotice(`yt-dlp đang ở bản ${status.version || 'mới nhất'}.`);
+        } catch (reason) { setError(errorMessage(reason)); }
+        finally { setYtDlpBusy(''); }
+    }
+
+    function chooseMaxHeight(value: number) {
+        setMaxHeight(value);
+        RememberMaxHeight(value).catch(() => undefined);
+    }
+
+    // Cookies let yt-dlp reuse a login the browser already holds; no password is
+    // ever entered into this app.
+    async function chooseCookieSource(value: string) {
+        if (value === 'file') {
+            try {
+                // Accepts the JSON that cookie extensions export as well as
+                // cookies.txt, and merges it with what is already stored.
+                const stored = normalizeCookieStatus(await AddCookieFile());
+                if (stored.count) {
+                    setCookieStatus(stored);
+                    setCookieSource(`file:${stored.path}`);
+                    setNotice(`Đã nạp ${stored.count} cookie cho: ${stored.domains.join(', ')}`);
+                }
+            } catch (reason) { setError(errorMessage(reason)); }
+            return;
+        }
+        setCookieSource(value);
+        RememberCookieSource(value).catch(reason => setError(errorMessage(reason)));
+    }
+
+    async function clearCookies() {
+        try {
+            await ClearCookies();
+            setCookieStatus({path: '', count: 0, domains: []});
+            setCookieSource('');
+            setNotice('Đã xóa cookie đã lưu.');
+        } catch (reason) { setError(errorMessage(reason)); }
+    }
+
+    // The PO token provider is what makes YouTube hand over media URLs when it
+    // answers 403 to everything else. All of it is optional.
+    function saveTuning(next: Tuning) {
+        setTuning(next);
+        RememberYtDlpTuning(next as any).catch(reason => setError(errorMessage(reason)));
+    }
+
+    async function pickPluginDir() {
+        try {
+            const stored = normalizeTuning(await SelectPluginDir());
+            if (stored.pluginDir) {
+                setTuning(stored);
+                setNotice(`Thư mục plugin yt-dlp: ${stored.pluginDir}`);
+            }
+        } catch (reason) { setError(errorMessage(reason)); }
+    }
+
+    async function installProvider() {
+        setProviderBusy("install"); setError("");
+        setNotice("Đang tải và dựng PO token provider…");
+        try {
+            const status: any = await InstallPOTokenProvider();
+            setProvider(status);
+            setTuning(normalizeTuning(await (await import("../wailsjs/go/main/App")).GetYtDlpTuning()));
+            setNotice(`Đã cài provider ${status.version || ""}.`);
+        } catch (reason) { setError(errorMessage(reason)); }
+        finally { setProviderBusy(""); }
+    }
+
+    async function toggleProvider() {
+        setProviderBusy("run"); setError("");
+        try {
+            const status: any = provider?.running ? await StopPOTokenProvider() : await StartPOTokenProvider(0);
+            setProvider(status);
+            if (status.running) {
+                setTuning(previous => ({...previous, providerUrl: `http://127.0.0.1:${status.port}`, pluginDir: status.pluginDir}));
+                setNotice(`Provider đang chạy tại cổng ${status.port}.`);
+            } else {
+                setNotice("Đã dừng provider.");
+            }
+        } catch (reason) { setError(errorMessage(reason)); }
+        finally { setProviderBusy(""); }
+    }
+
+    async function checkPlugins() {
+        setCheckingPlugins(true); setError("");
+        try {
+            const result: any = await CheckYtDlpPlugins("");
+            setPluginCheck(result);
+            appendLog(`Kiểm tra plugin yt-dlp: ${result.pluginsFound ? (result.plugins ?? []).join(", ") : "không thấy plugin"}` +
+                `${result.tokenUsed ? " · có PO token" : " · chưa có PO token"} · ${result.message ?? ""}`);
+        } catch (reason) { setError(errorMessage(reason)); }
+        finally { setCheckingPlugins(false); }
+    }
+
     async function installFFmpeg() {
         setFfmpegInstalling(true); setFfmpegProgress(0); setError('');
         setNotice(platform === 'darwin' ? 'Đang cài FFmpeg bằng Homebrew...' : 'Đang tải FFmpeg Essentials...');
@@ -450,6 +641,26 @@ function App() {
         });
     }
 
+    function openMoviePage(movie: MovieEntry) {
+        const pageURL = (movie.analysis.pageUrl || movie.source).trim();
+        if (pageURL) BrowserOpenURL(pageURL);
+    }
+
+    function openEpisodePage(episode: {pageUrl: string}) {
+        const pageURL = (episode.pageUrl || '').trim();
+        if (pageURL) BrowserOpenURL(pageURL);
+    }
+
+    function shortURL(value: string) {
+        try {
+            const parsed = new URL(value);
+            const compact = `${parsed.host}${parsed.pathname}`;
+            return compact.length > 58 ? `${compact.slice(0, 55)}…` : compact;
+        } catch {
+            return value.length > 58 ? `${value.slice(0, 55)}…` : value;
+        }
+    }
+
     function toggleCollapseAll() {
         setCollapsed(allCollapsed ? new Set() : new Set(movies.map(movie => movie.key)));
     }
@@ -487,12 +698,29 @@ function App() {
             .filter(item => !directoryFor(item.movie, item.key))
             .map(item => item.movie.analysis.title))];
         if (missingFolders.length) { setError(`Chưa chọn thư mục lưu cho: ${missingFolders.join(', ')}`); return; }
+        const youTubeEntries = selectedEntries.filter(item => isYouTube(item.episode.pageUrl));
+        if (youTubeEntries.length && !ytDlp.ready) {
+            setError(`Có ${youTubeEntries.length} video YouTube trong hàng đợi nhưng chưa có yt-dlp. Hãy bấm "Cài yt-dlp".`);
+            return;
+        }
         setError(''); setQueue({}); setDone(null); setLogs([]); setSavedLogPath(''); setActiveQueue(null); setProgress(null);
         startLogSession();
         appendLog(`Bắt đầu hàng đợi: ${selectedEntries.length} tập của ${selectedMovies.length} phim.`);
+        if (youTubeEntries.length) {
+            // YouTube changes often; the self-update runs at most once a day.
+            appendLog(`Kiểm tra bản yt-dlp mới cho ${youTubeEntries.length} video YouTube...`);
+            try {
+                const status: any = await EnsureYtDlpFresh();
+                setYtDlp(status);
+                appendLog(`yt-dlp đang dùng bản ${status.version || 'không rõ'}.`);
+            } catch (reason) {
+                appendLog(`Không kiểm tra được bản yt-dlp mới: ${errorMessage(reason)}`);
+            }
+        }
         try {
             await StartDownload({
-                title: 'Nhiều phim', outputDir: defaultOutputDir, preferredServer, skipExisting,
+                title: 'Nhiều phim', outputDir: defaultOutputDir, preferredServer, skipExisting, maxHeight,
+                cookieSource,
                 items: selectedEntries.map(({movie, episode, key}) => ({
                     id: key, name: episode.name, number: episode.number, pageUrl: episode.pageUrl,
                     streamUrl: episode.streamUrl || '', streams: episode.streams ?? [],
@@ -501,6 +729,7 @@ function App() {
             } as any);
             setRunning(true);
             setPaused(false);
+            setStopping(false);
             setNotice(`Đã xếp ${selectedEntries.length} tập của ${selectedMovies.length} phim vào hàng đợi tuần tự.`);
         } catch (reason) { setError(errorMessage(reason)); }
     }
@@ -510,12 +739,18 @@ function App() {
         try {
             const status: any = await PauseDownload();
             setPaused(Boolean(status.paused));
-            setNotice(status.paused ? 'Đã tạm dừng FFmpeg. Bấm Tiếp tục để tải tiếp.' : 'Đã tiếp tục hàng đợi tải.');
+            setNotice(status.paused
+                ? 'Đã tạm dừng. Tập đang tải bị treo lại và hàng đợi không sang tập mới cho tới khi bấm Tiếp tục.'
+                : 'Đã tiếp tục hàng đợi tải.');
         } catch (reason) { setError(errorMessage(reason)); }
         finally { setPauseBusy(false); }
     }
 
-    async function cancelDownload() { setPaused(false); await CancelDownload(); setNotice('Đang dừng FFmpeg...'); }
+    async function cancelDownload() {
+        setPaused(false); setStopping(true);
+        await CancelDownload();
+        setNotice('Đang dừng: FFmpeg và mọi tiến trình con của nó đã bị tắt.');
+    }
 
     async function saveLog() {
         if (!logs.length) { setError('Nhật ký đang trống.'); return; }
@@ -531,6 +766,12 @@ function App() {
             if (path) { setSavedLogPath(path); setNotice(`Đã lưu nhật ký: ${path}`); }
         } catch (reason) { setError(errorMessage(reason)); }
     }
+
+    const cookieFile = cookieSource.startsWith('file:') ? cookieSource.slice(5) : '';
+
+    const youTubeSelected = useMemo(() => movies.reduce((count, movie) => count + movie.analysis.episodes
+        .filter(episode => selected.has(episodeKey(movie.key, episode.id)) && isYouTube(episode.pageUrl)).length, 0),
+        [movies, selected]);
 
     const resultCounts = useMemo(() => {
         const values = Object.values(queue);
@@ -570,6 +811,7 @@ function App() {
                               onKeyDown={event => event.ctrlKey && event.key === 'Enter' && !analyzing && analyze()}
                               placeholder={'https://example.com/phim/bo-1\nhttps://example.com/phim/bo-2'} disabled={analyzing || running} spellCheck={false}/>
                     <button className="primary" onClick={analyze} disabled={analyzing || running}>{analyzing ? <><span className="spinner"/> {analyzeProgress}</> : 'Phân tích & thêm'}</button>
+                    {analyzing && <button className="stop-button analyze-stop" onClick={stopAnalyze}>■ Dừng</button>}
                 </div>
                 <div className="source-actions"><button className="ghost" onClick={openHTML} disabled={analyzing || running}>Mở file HTML</button><button className="ghost" onClick={pasteHTML} disabled={analyzing || running}>Dán HTML</button><span className="source-note">Ctrl + Enter để phân tích nhanh.</span></div>
             </section>
@@ -586,7 +828,14 @@ function App() {
                         <button onClick={clearList} disabled={running}>Xóa danh sách</button>
                     </div>}
                     <div className={`episode-list movie-list ${movies.length === 0 ? 'empty' : ''}`}>
-                        {movies.length === 0 && <div className="empty-state"><div className="empty-icon">⌁</div><strong>Chưa có phim trong danh sách</strong><span>Nhập một hoặc nhiều link ở bước 01.</span></div>}
+                        {analyzing && <div className="analyzing-row">
+                            <span className="spinner"/>
+                            <div>
+                                <strong>Đang phân tích {analyzeProgress}</strong>
+                                <small>Playlist dài có thể mất một lúc — bấm Dừng ở bước 01 để hủy.</small>
+                            </div>
+                        </div>}
+                        {movies.length === 0 && !analyzing && <div className="empty-state"><div className="empty-icon">⌁</div><strong>Chưa có phim trong danh sách</strong><span>Nhập một hoặc nhiều link ở bước 01.</span></div>}
                         {movies.map(movie => {
                             const movieKeys = movie.analysis.episodes.map(episode => episodeKey(movie.key, episode.id));
                             const movieSelected = movieKeys.filter(key => selected.has(key)).length;
@@ -603,8 +852,13 @@ function App() {
                                     <label className={`movie-check ${movieSelected ? 'checked' : ''}`}>
                                         <input type="checkbox" checked={movieAllSelected} onChange={() => toggleMovie(movie)} disabled={running}/><span className="custom-check">✓</span>
                                     </label>
-                                    <div className="movie-meta" onClick={() => toggleCollapse(movie.key)} title={isCollapsed ? 'Bấm để mở rộng' : 'Bấm để thu gọn'}>
-                                        <strong>{movie.analysis.title}</strong>
+                                    <div className="movie-meta">
+                                        <button type="button" className="movie-title-link" onClick={() => openMoviePage(movie)} title="Mở trang phim gốc trong trình duyệt">
+                                            {movie.analysis.title}
+                                        </button>
+                                        <button type="button" className="movie-source-link" onClick={() => openMoviePage(movie)} title={movie.analysis.pageUrl || movie.source}>
+                                            🔗 {shortURL(movie.analysis.pageUrl || movie.source)}
+                                        </button>
                                         <span>{movie.analysis.episodes.length} tập · đã chọn {movieSelected}{movieStates.length > 0 && <em className="movie-progress">✓ {movieDone} · ↷ {movieSkipped} · ! {movieFailed}</em>}</span>
                                         <small title={movie.outputDir || 'Chưa chọn thư mục'}>📁 {movie.outputDir || 'Chưa chọn thư mục lưu'}</small>
                                     </div>
@@ -628,6 +882,7 @@ function App() {
                                                     <i onClick={event => { event.preventDefault(); event.stopPropagation(); clearEpisodeDirectory(key); }} title="Dùng lại thư mục của phim">×</i>
                                                 </b>}
                                             </span>
+                                            <button type="button" className="episode-link" disabled={!episode.pageUrl} onClick={event => { event.preventDefault(); event.stopPropagation(); openEpisodePage(episode); }} title={episode.pageUrl || 'Không có link tập'}>🔗</button>
                                             <button className="folder-episode" disabled={running}
                                                     onClick={event => { event.preventDefault(); event.stopPropagation(); selectDirectoryForEpisode(key, episode.name); }}
                                                     title="Chọn thư mục lưu riêng cho tập này">📁</button>
@@ -658,10 +913,101 @@ function App() {
                         <label className="switch-row"><input type="checkbox" checked={skipExisting} onChange={event => setSkipExisting(event.target.checked)} disabled={running}/><span className="switch"><i/></span><span><strong>Bỏ qua file đã có</strong><small>Tiện tiếp tục một hàng đợi đang tải dở</small></span></label>
                         {canShutdown && <label className="switch-row"><input type="checkbox" checked={shutdownWhenDone} onChange={event => setShutdownWhenDone(event.target.checked)}/><span className="switch"><i/></span><span><strong>Tắt máy khi tải xong</strong><small>Chờ {shutdownDelaySeconds} giây sau khi hàng đợi kết thúc, có thể hủy</small></span></label>}
                         {shutdownSeconds > 0 && <ShutdownBanner seconds={shutdownSeconds} survivesAppExit={shutdownSurvives} onCancel={stopShutdown}/>}
+                        {youTubeSelected > 0 && <>
+                            <label className="field-label">Chất lượng YouTube <span>{youTubeSelected} video</span></label>
+                            <select value={maxHeight} onChange={event => chooseMaxHeight(Number(event.target.value))} disabled={running}>
+                                <option value={720}>Tối đa 720p</option>
+                                <option value={1080}>Tối đa 1080p</option>
+                                <option value={1440}>Tối đa 1440p</option>
+                                <option value={2160}>Tối đa 2160p (4K)</option>
+                                <option value={0}>Cao nhất có sẵn</option>
+                            </select>
+                        </>}
+                        {ytDlp.ready && <>
+                            <label className="field-label">Cookie đăng nhập <span>{cookieStatus.count ? `${cookieStatus.count} cookie` : 'YouTube chặn bot · Udemy…'}</span></label>
+                            <select value={cookieFile ? 'file' : cookieSource} onChange={event => chooseCookieSource(event.target.value)} disabled={running}>
+                                <option value="">Không dùng cookie</option>
+                                <option value="firefox">Firefox (đáng tin nhất)</option>
+                                <option value="chrome">Chrome</option>
+                                <option value="edge">Edge</option>
+                                <option value="brave">Brave</option>
+                                <option value="opera">Opera</option>
+                                <option value="vivaldi">Vivaldi</option>
+                                <option value="file">Nạp file cookie (.json / .txt)…</option>
+                            </select>
+                            {cookieFile && <div className="cookie-note">
+                                <small title={cookieStatus.domains.join(', ')}>🍪 {cookieStatus.domains.length ? cookieStatus.domains.join(' · ') : folderName(cookieFile)}</small>
+                                <div className="inline-actions">
+                                    <button onClick={() => chooseCookieSource('file')} disabled={running}>+ Thêm site</button>
+                                    <button onClick={clearCookies} disabled={running}>Xóa cookie</button>
+                                </div>
+                            </div>}
+                        </>}
+                        <div className={`tool-row ${ytDlp.ready ? 'ready' : ''}`}>
+                            <div>
+                                <strong>yt-dlp {ytDlp.ready ? <em title={ytDlp.path}>{ytDlp.version || 'đã cài'}</em> : <em className="missing">chưa cài</em>}</strong>
+                                <small>{ytDlp.ready ? 'Bộ tải YouTube; tự cập nhật logic khi YouTube thay đổi.' : 'Cần cho video và playlist YouTube (~17 MB, tải từ GitHub).'}</small>
+                            </div>
+                            {ytDlpBusy === 'install' && ytDlpProgress > 0 && <div className="mini-progress"><i style={{width: `${ytDlpProgress}%`}}/></div>}
+                            <div className="inline-actions">
+                                {!ytDlp.ready && <button onClick={installYtDlp} disabled={Boolean(ytDlpBusy)}>{ytDlpBusy === 'install' ? `${ytDlpProgress}%` : 'Cài yt-dlp'}</button>}
+                                {ytDlp.ready && <button onClick={updateYtDlp} disabled={Boolean(ytDlpBusy) || running}>{ytDlpBusy === 'update' ? 'Đang cập nhật…' : '↻ Cập nhật'}</button>}
+                            </div>
+                        </div>
+                        {ytDlp.ready && <div className="tuning-block">
+                            <button className="tuning-toggle" onClick={() => setTuningOpen(value => !value)}>
+                                {tuningOpen ? "▾" : "▸"} Nâng cao · PO token (khi YouTube trả 403)
+                            </button>
+                            {tuningOpen && <div className="tuning-body">
+                                <div className="provider-row">
+                                    <div>
+                                        <strong>Provider {provider?.version ? <em>{provider.version}</em> : <em className="missing">chưa cài</em>}</strong>
+                                        <small>{provider?.running ? `Đang chạy · cổng ${provider.port}` : provider?.serverInstalled ? "Đã cài, chưa chạy" : "Tự tải từ GitHub rồi dựng bằng Node"}</small>
+                                    </div>
+                                    <div className="inline-actions">
+                                        <button onClick={installProvider} disabled={Boolean(providerBusy) || running}>
+                                            {providerBusy === "install" ? "Đang cài…" : provider?.serverInstalled ? "Cài lại" : "Cài provider"}</button>
+                                        {provider?.serverInstalled && <button onClick={toggleProvider} disabled={Boolean(providerBusy) || running}>
+                                            {providerBusy === "run" ? "…" : provider?.running ? "Dừng" : "Chạy"}</button>}
+                                    </div>
+                                </div>
+                                <label className="field-label">Thư mục plugin yt-dlp</label>
+                                <div className="path-row">
+                                    <input value={tuning.pluginDir} readOnly title={tuning.pluginDir} placeholder="Chưa chọn"/>
+                                    <button onClick={pickPluginDir} disabled={running}>Chọn</button>
+                                </div>
+                                <label className="field-label">Địa chỉ provider</label>
+                                <input className="tuning-input" value={tuning.providerUrl} placeholder="http://127.0.0.1:4416"
+                                       onChange={event => saveTuning({...tuning, providerUrl: event.target.value})}
+                                       disabled={running}/>
+                                <label className="field-label">PO token nhập tay</label>
+                                <input className="tuning-input" value={tuning.token} placeholder="dán token nếu có"
+                                       onChange={event => saveTuning({...tuning, token: event.target.value})}
+                                       disabled={running}/>
+                                <label className="field-label">Player client</label>
+                                <select value={tuning.playerClient} onChange={event => saveTuning({...tuning, playerClient: event.target.value})} disabled={running}>
+                                    <option value="">Mặc định của yt-dlp</option>
+                                    <option value="web_safari">web_safari</option>
+                                    <option value="web">web</option>
+                                    <option value="tv">tv</option>
+                                    <option value="ios">ios</option>
+                                    <option value="android">android</option>
+                                </select>
+                                <div className="inline-actions">
+                                    <button onClick={checkPlugins} disabled={checkingPlugins || running}>
+                                        {checkingPlugins ? "Đang kiểm tra…" : "Kiểm tra plugin"}</button>
+                                </div>
+                                {pluginCheck && <div className={`tuning-result ${pluginCheck.resolved ? "ok" : "bad"}`}>
+                                    <span>{pluginCheck.pluginsFound ? `✓ Plugin: ${(pluginCheck.plugins ?? []).join(", ")}` : "✗ Chưa thấy plugin nào"}</span>
+                                    <span>{pluginCheck.tokenUsed ? "✓ Có PO token" : "✗ Chưa có PO token"}</span>
+                                    <small title={pluginCheck.message}>{pluginCheck.message}</small>
+                                </div>}
+                            </div>}
+                        </div>}
                         {!ffmpegReady && <div className="ffmpeg-setup"><div><strong>Cần FFmpeg</strong><small>{platform === 'darwin' ? 'Cài qua Homebrew hoặc chọn binary ffmpeg có sẵn.' : 'Tải Essentials khoảng 106 MB hoặc chọn bản có sẵn.'}</small></div>{ffmpegInstalling && platform !== 'darwin' && <div className="mini-progress"><i style={{width: `${ffmpegProgress}%`}}/></div>}<div className="inline-actions"><button onClick={installFFmpeg} disabled={ffmpegInstalling}>{ffmpegInstalling ? (platform === 'darwin' ? 'Đang cài…' : `${ffmpegProgress}%`) : (platform === 'darwin' ? 'Cài bằng Homebrew' : 'Tự cài')}</button><button onClick={chooseFFmpeg} disabled={ffmpegInstalling}>Chọn file</button></div></div>}
                         {movies.length > 0 && <div className={`batch-summary ${allSelected ? 'all' : ''}`}><span>{selectedMovies.length} phim</span><strong>{selectedCount}/{allEpisodeKeys.length} tập</strong></div>}
                         {!running && <button className="download-button" onClick={startDownload} disabled={selectedCount === 0}>{`Tải ${selectedCount || ''} tập · ${selectedMovies.length} phim`}</button>}
-                        {running && <div className="download-controls"><button className="pause-button" onClick={togglePause} disabled={pauseBusy || (!paused && activeQueue?.status !== 'downloading')}>{pauseBusy ? 'Đang xử lý…' : paused ? '▶ Tiếp tục' : '⏸ Tạm dừng'}</button><button className="stop-button" onClick={cancelDownload}>■ Dừng</button></div>}
+                        {running && <div className="download-controls"><button className="pause-button" onClick={togglePause} disabled={pauseBusy || stopping}>{pauseBusy ? 'Đang xử lý…' : paused ? '▶ Tiếp tục' : '⏸ Tạm dừng'}</button><button className="stop-button" onClick={cancelDownload} disabled={stopping}>{stopping ? 'Đang dừng…' : '■ Dừng'}</button></div>}
                         <p className="legal-note">Chỉ tải nội dung bạn sở hữu hoặc được phép lưu. Không hỗ trợ DRM.</p>
                     </section>
 

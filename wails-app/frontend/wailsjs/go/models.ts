@@ -7,6 +7,7 @@ export namespace main {
 	    pageUrl: string;
 	    streamUrl?: string;
 	    streams?: MediaStream[];
+	    engine?: string;
 	    current: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -21,6 +22,7 @@ export namespace main {
 	        this.pageUrl = source["pageUrl"];
 	        this.streamUrl = source["streamUrl"];
 	        this.streams = this.convertValues(source["streams"], MediaStream);
+	        this.engine = source["engine"];
 	        this.current = source["current"];
 	    }
 	
@@ -98,6 +100,22 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class CookieStatus {
+	    path: string;
+	    count: number;
+	    domains: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new CookieStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.count = source["count"];
+	        this.domains = source["domains"];
+	    }
+	}
 	export class DownloadControlStatus {
 	    paused: boolean;
 	
@@ -117,6 +135,7 @@ export namespace main {
 	    pageUrl: string;
 	    streamUrl?: string;
 	    streams?: MediaStream[];
+	    engine?: string;
 	    title?: string;
 	    outputDir?: string;
 	
@@ -132,6 +151,7 @@ export namespace main {
 	        this.pageUrl = source["pageUrl"];
 	        this.streamUrl = source["streamUrl"];
 	        this.streams = this.convertValues(source["streams"], MediaStream);
+	        this.engine = source["engine"];
 	        this.title = source["title"];
 	        this.outputDir = source["outputDir"];
 	    }
@@ -160,6 +180,8 @@ export namespace main {
 	    preferredServer: string;
 	    items: DownloadItem[];
 	    skipExisting: boolean;
+	    maxHeight: number;
+	    cookieSource?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new DownloadRequest(source);
@@ -172,6 +194,8 @@ export namespace main {
 	        this.preferredServer = source["preferredServer"];
 	        this.items = this.convertValues(source["items"], DownloadItem);
 	        this.skipExisting = source["skipExisting"];
+	        this.maxHeight = source["maxHeight"];
+	        this.cookieSource = source["cookieSource"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -207,6 +231,42 @@ export namespace main {
 	        this.path = source["path"];
 	    }
 	}
+	export class YtDlpTuning {
+	    pluginDir: string;
+	    providerUrl: string;
+	    token: string;
+	    playerClient: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new YtDlpTuning(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.pluginDir = source["pluginDir"];
+	        this.providerUrl = source["providerUrl"];
+	        this.token = source["token"];
+	        this.playerClient = source["playerClient"];
+	    }
+	}
+	export class ToolStatus {
+	    ready: boolean;
+	    path: string;
+	    version: string;
+	    checkedAt: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ToolStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ready = source["ready"];
+	        this.path = source["path"];
+	        this.version = source["version"];
+	        this.checkedAt = source["checkedAt"];
+	    }
+	}
 	export class InitialState {
 	    lastOutputDir: string;
 	    ffmpegReady: boolean;
@@ -217,6 +277,11 @@ export namespace main {
 	    logDir: string;
 	    logPath: string;
 	    canShutdown: boolean;
+	    ytDlp: ToolStatus;
+	    maxHeight: number;
+	    cookieSource: string;
+	    cookies: CookieStatus;
+	    tuning: YtDlpTuning;
 	
 	    static createFrom(source: any = {}) {
 	        return new InitialState(source);
@@ -233,9 +298,78 @@ export namespace main {
 	        this.logDir = source["logDir"];
 	        this.logPath = source["logPath"];
 	        this.canShutdown = source["canShutdown"];
+	        this.ytDlp = this.convertValues(source["ytDlp"], ToolStatus);
+	        this.maxHeight = source["maxHeight"];
+	        this.cookieSource = source["cookieSource"];
+	        this.cookies = this.convertValues(source["cookies"], CookieStatus);
+	        this.tuning = this.convertValues(source["tuning"], YtDlpTuning);
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	
+	export class PluginCheck {
+	    pluginsFound: boolean;
+	    tokenUsed: boolean;
+	    resolved: boolean;
+	    plugins: string[];
+	    message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new PluginCheck(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.pluginsFound = source["pluginsFound"];
+	        this.tokenUsed = source["tokenUsed"];
+	        this.resolved = source["resolved"];
+	        this.plugins = source["plugins"];
+	        this.message = source["message"];
+	    }
+	}
+	export class ProviderStatus {
+	    pluginInstalled: boolean;
+	    pluginDir: string;
+	    serverInstalled: boolean;
+	    serverDir: string;
+	    running: boolean;
+	    port: number;
+	    version: string;
+	    nodeVersion: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ProviderStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.pluginInstalled = source["pluginInstalled"];
+	        this.pluginDir = source["pluginDir"];
+	        this.serverInstalled = source["serverInstalled"];
+	        this.serverDir = source["serverDir"];
+	        this.running = source["running"];
+	        this.port = source["port"];
+	        this.version = source["version"];
+	        this.nodeVersion = source["nodeVersion"];
+	    }
+	}
 	export class SessionSummary {
 	    movies: number;
 	    episodes: number;
@@ -271,6 +405,7 @@ export namespace main {
 	    pageUrl: string;
 	    streamUrl?: string;
 	    streams?: MediaStream[];
+	    engine?: string;
 	    outputDir?: string;
 	    selected: boolean;
 	    status?: string;
@@ -289,6 +424,7 @@ export namespace main {
 	        this.pageUrl = source["pageUrl"];
 	        this.streamUrl = source["streamUrl"];
 	        this.streams = this.convertValues(source["streams"], MediaStream);
+	        this.engine = source["engine"];
 	        this.outputDir = source["outputDir"];
 	        this.selected = source["selected"];
 	        this.status = source["status"];
@@ -460,6 +596,7 @@ export namespace main {
 	        this.content = source["content"];
 	    }
 	}
+	
 
 }
 

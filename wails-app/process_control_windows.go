@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,6 +20,10 @@ import (
 const (
 	createNoWindow       = 0x08000000
 	processSuspendResume = 0x0800
+	// NTSTATUS values that mean the target is already on its way out, which is a
+	// normal race with an episode that has just finished, not a failure.
+	statusProcessIsTerminating = 0xc000010a
+	statusInvalidHandle        = 0xc0000008
 )
 
 var (
@@ -69,9 +74,24 @@ func killProcessTree(process *os.Process) error {
 	if process == nil {
 		return nil
 	}
-	// TerminateProcess reaches suspended processes too, so a paused download
-	// can still be stopped.
-	return process.Kill()
+	// TerminateProcess reaches suspended processes too, so a paused download can
+	// still be stopped — but it ends that one process only. yt-dlp runs its own
+	// FFmpeg, which would keep writing the file after Dừng, so the whole tree is
+	// taken down first, while the parent is still there to name its children.
+	if process.Pid > 0 {
+		command := exec.Command("taskkill", "/F", "/T", "/PID", strconv.Itoa(process.Pid))
+		prepareBackgroundCommand(command)
+		if err := command.Run(); err == nil {
+			return nil
+		}
+	}
+	// Windows answers "access denied" for a process that has already ended, and
+	// these are our own children, so neither outcome is a real failure.
+	if err := process.Kill(); err != nil &&
+		!errors.Is(err, os.ErrProcessDone) && !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		return err
+	}
+	return nil
 }
 
 // superviseProcess ties FFmpeg to a job object that Windows tears down when the
@@ -120,8 +140,16 @@ func setProcessPaused(process *os.Process, paused bool) error {
 	if process == nil {
 		return fmt.Errorf("không tìm thấy tiến trình FFmpeg")
 	}
+	if process.Pid <= 0 {
+		return errProcessGone
+	}
 	handle, err := windows.OpenProcess(processSuspendResume, false, uint32(process.Pid))
 	if err != nil {
+		// A PID that no longer exists fails here with "invalid parameter", which
+		// only means the episode ended first.
+		if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+			return errProcessGone
+		}
 		return fmt.Errorf("không thể điều khiển FFmpeg: %w", err)
 	}
 	defer windows.CloseHandle(handle)
@@ -132,8 +160,12 @@ func setProcessPaused(process *os.Process, paused bool) error {
 		operation = "tạm dừng"
 	}
 	status, _, _ := procedure.Call(uintptr(handle))
-	if status != 0 {
+	switch status {
+	case 0:
+		return nil
+	case statusProcessIsTerminating, statusInvalidHandle:
+		return errProcessGone
+	default:
 		return fmt.Errorf("không thể %s FFmpeg (NTSTATUS 0x%x)", operation, status)
 	}
-	return nil
 }

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -59,18 +60,25 @@ func killProcessTree(process *os.Process) error {
 	if err := syscall.Kill(-process.Pid, syscall.SIGKILL); err == nil {
 		return nil
 	}
-	return process.Kill()
+	if err := process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return err
+	}
+	return nil
 }
 
 func setProcessPaused(process *os.Process, paused bool) error {
 	if process == nil {
-		return fmt.Errorf("không tìm thấy tiến trình FFmpeg")
+		return errProcessGone
 	}
 	signal := syscall.SIGCONT
 	if paused {
 		signal = syscall.SIGSTOP
 	}
 	if err := syscall.Kill(process.Pid, signal); err != nil {
+		// The episode may simply have ended between the button press and here.
+		if errors.Is(err, syscall.ESRCH) {
+			return errProcessGone
+		}
 		return fmt.Errorf("không thể điều khiển FFmpeg: %w", err)
 	}
 	return nil

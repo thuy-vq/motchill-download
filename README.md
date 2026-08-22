@@ -14,7 +14,7 @@ dist\VideoHtmlDownloader.exe
 Quy trình sử dụng:
 
 1. Dán một hoặc nhiều URL (mỗi URL một dòng) rồi chọn **Phân tích & thêm**. Từng link được xử lý tuần tự và thêm vào danh sách hiện có. Có thể dùng **Mở file HTML** hoặc **Dán HTML** nếu trang chặn tải tự động.
-2. Mỗi phim được hiển thị thành một nhóm riêng cùng toàn bộ tập và vị trí lưu. Có thể chọn từng tập, từng phim hoặc dùng checkbox **Chọn tất cả**. Bấm vào tên phim hoặc nút mũi tên để thu gọn/mở rộng danh sách tập của nhóm đó; nút **Thu gọn tất cả** gập toàn bộ danh sách. Khi thu gọn, dòng tiêu đề vẫn hiện số tập hoàn tất, bỏ qua và lỗi.
+2. Mỗi phim được hiển thị thành một nhóm riêng cùng toàn bộ tập và vị trí lưu. Có thể chọn từng tập, từng phim hoặc dùng checkbox **Chọn tất cả**. Bấm vào tên phim để mở trang phim gốc trong trình duyệt; bấm nút mũi tên để thu gọn/mở rộng danh sách tập của nhóm đó. Nút **Thu gọn tất cả** gập toàn bộ danh sách. Khi thu gọn, dòng tiêu đề vẫn hiện số tập hoàn tất, bỏ qua và lỗi.
 3. Chọn thư mục lưu theo ba mức: nút **Chọn** ở khung thiết lập áp cho mọi phim đang chọn, nút 📁 ở dòng phim áp cho riêng phim đó, nút 📁 ở dòng tập chỉ áp cho tập đó. Thư mục của tập luôn được ưu tiên hơn thư mục của phim.
 4. Cài/chọn FFmpeg ở lần đầu, sau đó bấm **Tải**. Tất cả phim và tập được tải lần lượt; server khác sẽ được thử nếu server ưu tiên lỗi. Có thể bật **Tắt máy khi tải xong** — máy tắt sau 60 giây kể từ lúc hàng đợi kết thúc và luôn có nút hủy.
 5. Thẻ **Kết quả** bên cạnh **Nhật ký** liệt kê theo từng phim: tập nào hoàn tất (kèm nơi lưu), tập nào lỗi (kèm lý do), tập nào chưa tải; có bộ lọc chỉ hiện lỗi và nút chọn đúng các tập lỗi để tải lại.
@@ -40,6 +40,85 @@ Mỗi tập đang tải có thanh tiến độ riêng kèm phần trăm, thời 
 
 Tùy chọn **Bỏ qua file đã có** cho phép tiếp tục một bộ đang tải dở mà không tải lại các tập hoàn chỉnh.
 Ứng dụng đọc `episodeVariants` của từng trang tập, kiểm tra canonical, URL stream và fingerprint đầu ra; nếu hai tập trả về cùng video, bản trùng bị từ chối thay vì được lưu nhầm.
+
+## YouTube
+
+Dán link video (`watch?v=…`, `youtu.be/…`) hoặc link playlist: playlist trở thành một nhóm trong danh sách, mỗi video là một tập, file được đặt tên theo tiêu đề video (`01 - Tên video.mp4`).
+
+Phần này chạy bằng [yt-dlp](https://github.com/yt-dlp/yt-dlp) — thư viện giữ logic bóc tách YouTube và cập nhật rất thường xuyên. Ứng dụng quản lý nó giống FFmpeg:
+
+- Nút **Cài yt-dlp** tải bản mới nhất từ GitHub (~17 MB) vào `%LOCALAPPDATA%\MotchillDownloader`.
+- Nút **↻ Cập nhật** chạy `yt-dlp -U` (tự cập nhật). Nếu bản đang dùng do trình quản lý gói cài và không tự update được, ứng dụng tải bản riêng của mình.
+- Trước mỗi hàng đợi có video YouTube, ứng dụng tự kiểm tra bản mới, tối đa **một lần mỗi ngày** — nên khi YouTube thay đổi thì logic được cập nhật mà không cần build lại app.
+- Ô **Chất lượng YouTube** chọn mức tối đa (720p → 4K hoặc cao nhất có sẵn); video và audio tốt nhất được ghép lại thành MP4 bằng FFmpeg của ứng dụng.
+
+Tiến độ, tạm dừng, dừng, chống treo, thư mục riêng từng video và thông báo Toast dùng chung cơ chế với phần tải phim. Giai đoạn **ghép video + audio** của một tập 4K dài có thể chạy vài phút mà không in tiến độ, nên cơ chế chống treo tự tắt khi thấy dòng `[Merger]` — nếu không, đúng những tập lớn nhất sẽ bị hiểu là treo và bị hủy.
+
+Các lượt YouTube được giãn tối thiểu 20 giây giữa hai lần bóc tách và dùng preset nghỉ 10–20 giây của yt-dlp trước khi tải. Khi YouTube báo rõ tài khoản bị rate limit theo giờ, ứng dụng không chạy ào sang các tập kế tiếp: tập hiện tại được giữ lại, hàng đợi nghỉ 1 giờ rồi thử lại một lần; nếu giới hạn vẫn còn, hàng đợi dừng và giữ nguyên các tập phía sau.
+
+
+### Khi YouTube trả 403 (PO token)
+
+YouTube gắn URL media với một **PO token** do JS trong trình duyệt sinh ra. Khi thiếu token, yt-dlp vẫn lấy được thông tin video nhưng tải xuống thì nhận `HTTP Error 403`. Cách xử lý được yt-dlp hỗ trợ chính thức là dùng một **PO token provider plugin**; ứng dụng có phần **Nâng cao · PO token** trong khung thiết lập để trỏ tới nó:
+
+| Ô | Ý nghĩa | Tham số yt-dlp |
+| --- | --- | --- |
+| Thư mục plugin yt-dlp | Nơi chứa plugin provider | `--plugin-dirs <dir>` |
+| Địa chỉ provider | Server provider đang chạy | `--extractor-args youtubepot-bgutilhttp:base_url=<url>` |
+| PO token nhập tay | Token dán trực tiếp cho một lần tải | `--extractor-args youtube:po_token=<token>` |
+| Player client | Ép yt-dlp hỏi client khác | `--extractor-args youtube:player_client=<client>` |
+
+Để trống thì **không tham số nào được thêm vào** — ứng dụng chạy y như trước. Nút **Kiểm tra plugin** chạy thử một lần và báo rõ: có thấy plugin không, có lấy được PO token không, và có resolve được video không.
+
+**Ứng dụng tự lo toàn bộ phần này.** Nút **Cài provider** sẽ: hỏi GitHub tag mới nhất → tải plugin và mã nguồn đúng tag → `npm install --ignore-scripts` (chặn script cài đặt của cây phụ thuộc) → build bằng TypeScript có sẵn trong `node_modules` → đặt tại `%LOCALAPPDATA%\MotchillDownloader\pot-provider`. Nút **Chạy** khởi động server ở `127.0.0.1` và chờ `/ping`. Tiến trình được gắn vào job object nên tắt ứng dụng là nó tắt theo. Cần sẵn Node.js trên máy.
+
+Một chi tiết quan trọng: **bản yt-dlp `.exe` không nạp được plugin ngoài** (`Plugin directories: none` dù đã truyền `--plugin-dirs`). Vì vậy ứng dụng không dựa vào plugin mà **tự gọi provider qua HTTP** (`POST /get_pot`) để lấy PO token, rồi truyền cho yt-dlp bằng tham số tài liệu hóa:
+
+```text
+--js-runtimes node
+--extractor-args youtube:player_client=tv_simply;visitor_data=<binding>;po_token=tv_simply.gvs+<token>
+```
+
+Token được nhớ trong bộ nhớ tới trước hạn 10 phút rồi tự lấy lại; provider tự khởi động khi hàng đợi cần.
+
+### Player client mới là thứ quyết định, không phải PO token
+
+Đo trực tiếp trên một video 4K (tải thật, không chỉ `--simulate` — resolve được **không** có nghĩa là tải được):
+
+| Player client | Kết quả khi tải format DASH |
+| --- | --- |
+| `web_embedded` ← **mặc định** | **Tải trọn 2160p HDR, không cần PO token** |
+| `mweb` | 403 giữa chừng (~2.5%) |
+| `tv_simply`, `android_vr`, mặc định của yt-dlp | 403 |
+| `web`, `web_safari` | Không có format DASH nào (YouTube ép SABR) |
+| `tv` | `The page needs to be reloaded` |
+
+Với `mweb` và `tv_simply`, media URL trả 403 **bất kể** có PO token hay không, và bất kể token gắn với tài khoản, visitor hay video id. Chỉ format muxed 18 (360p) là tải được — dấu hiệu token bị từ chối cho GVS. `web_embedded` cho đủ format tới 8K và không cần token, nên đó là client ứng dụng dùng.
+
+Ô **Player client** trong thiết lập vẫn đè lên lựa chọn này; khi bạn điền tay, ứng dụng sẽ mint PO token gắn với phiên hiện tại kèm theo — đó là thứ để thử khi cách trên hỏng.
+
+Một chi tiết nữa: `--plugin-dirs` bị bản `.exe` **bỏ qua trong im lặng** (`Plugin directories: none`, không cảnh báo), nên plugin provider của yt-dlp không bao giờ được nạp dù thư mục đúng chuẩn.
+
+### Phiên YouTube: cookie tự làm mới
+
+Mỗi lần bấm **Phân tích**, ứng dụng gọi `https://www.youtube.com/` kèm cookie đang chọn để mở một phiên mới, đọc `visitorData` và `DATASYNC_ID` trong cấu hình player. Cookie YouTube trả về (`SIDCC`, `__Secure-1PSIDCC`…) được ghi đè lại vào store, nên **file cookie tự làm mới sau mỗi lượt** thay vì chết sau một lần dùng. Khi không chọn nguồn cookie nào, cookie khách của phiên được giữ riêng ở `%APPDATA%\MotchillDownloader\youtube-guest.txt`. Phiên sống tối đa 30 phút; nguồn cookie là trình duyệt thì yt-dlp đọc trực tiếp nên vốn đã luôn mới.
+
+Các số liệu trên đo bằng test có cổng môi trường, chạy lại được khi YouTube đổi:
+
+```bash
+cd wails-app && MOTCHILL_LIVE_YOUTUBE=1 go test -run TestLiveClientsWithoutToken -v -timeout 1200s
+```
+
+## Site cần đăng nhập (Udemy, Vimeo, Coursera…)
+
+Các host này cũng đi qua yt-dlp. Vì nội dung nằm sau đăng nhập, ứng dụng dùng **cookie của trình duyệt** mà bạn đã đăng nhập sẵn:
+
+- Chọn trình duyệt ở ô **Cookie đăng nhập** (Chrome/Edge/Firefox/Brave/Opera/Vivaldi) — tương đương `yt-dlp --cookies-from-browser`. Chrome/Edge bản mới mã hóa cookie theo App-Bound Encryption nên thường đọc không ra; Firefox đáng tin nhất.
+- Hoặc **Nạp file cookie (.json / .txt)**: nhận cả `cookies.txt` (Netscape) và **JSON do extension xuất ra** (`{"cookies":[…]}` hoặc mảng thuần) — ứng dụng tự chuyển sang định dạng Netscape mà yt-dlp cần, giữ nguyên cookie HttpOnly và cookie phiên. Nạp thêm file của site khác sẽ **gộp** vào cùng một store, nên dùng được nhiều site một lúc; nút **Xóa cookie** xóa hẳn.
+- Cookie đã chuyển được lưu tại `%APPDATA%\MotchillDownloader\cookies.txt`. Đây là dữ liệu đăng nhập: trên Linux/macOS file được ghi với quyền `0600`, trên Windows nó dựa vào ACL của thư mục `%APPDATA%` riêng từng user. Ứng dụng chỉ hiện **số lượng cookie và tên miền**, không bao giờ hiện giá trị.
+- Ứng dụng **không nhận và không lưu mật khẩu**; chỉ mượn session cookie sẵn có.
+- Udemy Business dạng `<tên-công-ty>.udemy.com` cũng được nhận diện.
+- Bài giảng được bảo vệ bằng DRM (Widevine) thì **không tải được** — ứng dụng không phá DRM.
 
 ## Nguồn được hỗ trợ
 

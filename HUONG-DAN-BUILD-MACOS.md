@@ -91,23 +91,35 @@ Từ thư mục gốc `motchill`, chạy:
 bash build-macos.sh
 ```
 
+Mỗi lần chạy lệnh trên, số phiên bản tự tăng thêm một bậc mà không cần thao tác gì thêm.
+
 Script sẽ tự động:
 
-1. Chạy kiểm thử Go.
-2. Build frontend React/TypeScript.
-3. Build ứng dụng Wails Universal cho Intel và Apple Silicon.
-4. Ký ứng dụng bằng chữ ký ad-hoc.
-5. Nén ứng dụng thành file ZIP.
+1. Tăng số phiên bản trong `VERSION`, `wails-app/version.go` và `wails-app/wails.json`.
+2. Build frontend React/TypeScript nếu `wails-app/frontend/dist` chưa tồn tại.
+3. Chạy kiểm thử Go.
+4. Build ứng dụng Wails Universal cho Intel và Apple Silicon.
+5. Ký ứng dụng bằng chữ ký ad-hoc.
+6. Đóng gói thành file ZIP và file DMG.
 
-Kết quả nằm tại:
+Kết quả nằm tại thư mục `dist-macos`, với `1.0.28` là số phiên bản hiện tại:
 
 ```text
-dist-macos/VideoHtmlDownloader-v1.0.1-macOS-12-universal.zip
+dist-macos/VideoHtmlDownloader-v1.0.28-macOS-12-universal.dmg
+dist-macos/VideoHtmlDownloader-v1.0.28-macOS-12-universal.zip
+```
+
+Hai file chứa cùng một ứng dụng. Dùng file DMG để cài đặt, file ZIP để gửi qua mạng.
+
+Chỉ khi cần build lại mà giữ nguyên số phiên bản, ví dụ lúc thử lại một bản build lỗi, mới đặt thêm biến môi trường:
+
+```bash
+BUMP_VERSION=0 bash build-macos.sh
 ```
 
 ## 6. Cài và mở ứng dụng
 
-Giải nén file ZIP, sau đó kéo `VideoHtmlDownloader.app` vào thư mục **Applications**.
+Mở file DMG, sau đó kéo `VideoHtmlDownloader.app` vào thư mục **Applications** ngay trong cửa sổ vừa hiện ra. Nếu dùng file ZIP thì giải nén rồi kéo tương tự.
 
 Ở lần mở đầu tiên, nếu macOS cảnh báo ứng dụng chưa đến từ nhà phát triển đã xác minh:
 
@@ -127,7 +139,21 @@ Trên một số máy Mac Intel, đường dẫn có thể là:
 /usr/local/bin/ffmpeg
 ```
 
-## 7. Build lại sau khi sửa code
+## 7. Ý nghĩa các thư mục kết quả
+
+Quá trình build sinh ra ba thư mục. Cả ba đều nằm trong `.gitignore` nên không được đưa lên Git.
+
+| Thư mục | Vai trò |
+| --- | --- |
+| `wails-app/frontend/dist` | Giao diện React sau khi Vite biên dịch. Đây là kết quả trung gian, được nhúng thẳng vào file thực thi Go. |
+| `wails-app/build/bin` | Nơi Wails đặt `VideoHtmlDownloader.app` vừa biên dịch. Cũng là kết quả trung gian. |
+| `dist-macos` | Thư mục phát hành của macOS, chứa file DMG và file ZIP để cài đặt hoặc gửi cho người khác. |
+
+Ngoài ra còn thư mục `dist` ở gốc dự án. Đó là thư mục phát hành của Windows do `build.cmd` tạo ra và chỉ chứa file `.exe`, không liên quan đến bản macOS.
+
+Xóa cả ba thư mục trên đều an toàn, lần build kế tiếp sẽ tạo lại đầy đủ.
+
+## 8. Build lại sau khi sửa code
 
 Chỉ cần mở Terminal tại thư mục dự án và chạy lại:
 
@@ -135,7 +161,7 @@ Chỉ cần mở Terminal tại thư mục dự án và chạy lại:
 bash build-macos.sh
 ```
 
-Mỗi lần build, số patch sẽ tự tăng (`1.0.1` → `1.0.2`) và tạo một file ZIP có số phiên bản mới trong `dist-macos`.
+Mỗi lần build, số patch sẽ tự tăng (`1.0.28` → `1.0.29`) và tạo file DMG cùng file ZIP có số phiên bản mới trong `dist-macos`.
 
 ## Xử lý lỗi thường gặp
 
